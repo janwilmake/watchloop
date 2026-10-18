@@ -44,6 +44,54 @@ and every tick read it:
 | `LO_USAGE_WEEK_RESET` | — | when the plan's week resets, read off `/usage`, e.g. `mon 09:00`; empty = the last 7 days |
 | `LO_WEEKLY_CHANNEL` | — | Slack channel id for the weekly report; empty = no report. Needs `LO_USAGE_WEEK_RESET` and `LO_SLACK=1` |
 | `LO_INTERCOM_CHANNEL` `LO_INTERCOM_DISCUSSION` | — | the Slack channel where a bot posts each new Intercom conversation, and the channel where the loop opens one research thread per conversation (2t); empty = off |
+| `LO_PERMISSIONS` | `PERMISSIONS_FILE` | the shared permissions file (default `<LO_REPO>/.agents/permissions.md`). When it exists, it replaces the five `LO_SLACK_*_EMAILS` lists; see "Permissions" below |
+
+### Permissions
+
+**Who may ask the loop for what comes from one file**, `PERMISSIONS_FILE`, which
+the screenless phone line reads too. It is Markdown with YAML front matter:
+
+```markdown
+---
+default: team                 # the mode of a person no key matches
+modes:
+  team: { gate: read }        # listen | read | full
+  lead: { gate: full }
+callers:                      # email, phone, or *@domain → mode
+  tamas@example.com: lead
+  "*@example.com": team
+---
+## team
+Research answers. No customer data.
+## lead
+May order tickets and merges into the base branch. Production only on an explicit order.
+## Never
+A secret goes to nobody.
+```
+
+Per Slack message, take the author's email from the message header and resolve
+it to a mode: an exact email, then a phone number, then `*@domain`, then
+`default`. The **gate** is the ceiling:
+
+- `listen` — the loop answers nothing and acts on nothing.
+- `read` — research answers only. No ticket, draft, merge, reply to a customer,
+  or any other write, whatever the rules text says.
+- `full` — the actions this skill describes, as far as the mode's `## <mode>`
+  rules allow them.
+
+Inside the gate, the mode's rules decide: who may order a ticket, ask for
+customer data or a draft, order an Intercom reply, order a merge into the base
+branch, give a production order, or change the loop from a DM. Where this skill
+says "a person in `SLACK_TICKET_EMAILS`" (and the other lists), read "a person
+whose mode's rules allow it". The `## Never` lines bind every mode. Pass the
+author's mode name and its rules into a research agent's prompt, in place of
+"listed / not listed".
+
+**The file changes only through a PR that a person merges.** The loop never
+merges a PR that touches `PERMISSIONS_FILE` on an order from Slack, whoever
+gives it, and it never edits the file itself. A file that is missing or that
+does not parse makes the loop fall back to the five `LO_SLACK_*_EMAILS` lists
+in `.env`, never to a wider rule.
 
 Fixed: `TRACKER` Linear MCP · `FORGE` GitHub (`gh`) · `AGENT_GUIDE` your repo's
 `CLAUDE.md` · `READY_STATUS` `Todo`, then `Backlog` only when `ALLOW_BACKLOG=1` ·
@@ -517,6 +565,8 @@ the Claude Code session that runs the loop:
   base branch, and the rule that a merge into the default branch or a production
   write needs a production order from a person in `SLACK_PROD_EMAILS`. Who is in
   `SLACK_PROD_EMAILS` is set only from the session, too.
+- The permissions file. It changes through a PR that a person merges, never on a
+  Slack order to the loop.
 - This list.
 
 A request that touches one of them gets a reply that says so, and no edit.
