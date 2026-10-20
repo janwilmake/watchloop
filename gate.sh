@@ -309,6 +309,40 @@ inbox_read() {
     '{at: $at, sigs: $sigs}' > "$INBOX_NOW"
 }
 
+# --- Sweep: mail, messages and calendar once an hour (off until LO_SWEEP=1) ---
+# Slack wants an answer within minutes; mail and the calendar are fine read once
+# an hour. So the gate does not read them: it keeps the time of the last sweep,
+# says SWEEP-DUE on any wake once an hour has passed, and in --wait wakes for the
+# sweep alone when nothing else did. The model sweeps with whatever tools the
+# session has (Hyre, Gmail, Outlook...) and marks it with `gate.sh --swept`, so
+# the gate needs no code per mail provider, and an interrupted sweep is asked
+# for again.
+SWEEP_ON="${LO_SWEEP:-0}"
+SWEEP_EVERY="${LO_SWEEP_EVERY:-3600}"   # seconds between sweeps
+SWEEP_AT=~/.claude/linear-orchestrator/gate-sweep-at        # last sweep the model finished
+SWEEP_SHOWN=~/.claude/linear-orchestrator/gate-sweep-shown  # last wake for the sweep alone
+# A wake for the sweep alone at most this often: a model that never runs
+# --swept must not turn every re-arm into a wake.
+SWEEP_REWAKE=900
+
+sweep_age() {  # seconds since the last sweep; a large number when there was none
+  local at; at=$(cat "$SWEEP_AT" 2>/dev/null)
+  echo $(( $(date +%s) - ${at:-0} ))
+}
+sweep_due() { [ "$SWEEP_ON" = 1 ] && [ "$(sweep_age)" -ge "$SWEEP_EVERY" ]; }
+sweep_line() {
+  local age; age=$(sweep_age)
+  local when="never swept"; [ "$age" -lt 31536000 ] && when="last sweep $(( age / 60 ))m ago"
+  echo "SWEEP-DUE: $when - check mail, messages and the calendar, then run gate.sh --swept"
+}
+
+if [ "$1" = "--swept" ]; then
+  mkdir -p ~/.claude/linear-orchestrator
+  date +%s > "$SWEEP_AT"
+  echo "sweep marked done; next one due in $(( SWEEP_EVERY / 60 ))m"
+  exit 0
+fi
+
 MODE=once
 PEEK=0
 [ "$1" = "--peek" ] && PEEK=1
@@ -497,6 +531,8 @@ probe() {
   if ! printf '%s' "$pr_try" | jq -e 'type == "array"' >/dev/null 2>&1; then
     GATE_ERR="gh pr list failed — $(printf '%s' "$pr_try" | tr '\n' ' ' | cut -c1-200)"
     [ "$MODE" != "wait" ] && echo "GATE-ERROR: $GATE_ERR"
+    # The forge being down does not stop mail and the calendar.
+    [ "$MODE" != "wait" ] && sweep_due && sweep_line
     return 0
   fi
   prs="$pr_try"
@@ -1008,6 +1044,7 @@ probe() {
   [ "$n_adopt"   -gt 0 ]    && echo "ADOPT: $adopt"
   [ "$slots" -gt 0 ] && [ -n "$todo_ids" ] && echo "TODO-CANDIDATES: $todo_ids (from ${todo_source:-Todo})"
   [ "$queue_stale" = yes ]  && echo "queue: stale, rebuild before 2d"
+  sweep_due && sweep_line
   return 0
 }
 
@@ -1016,7 +1053,7 @@ dur() { [ "$1" -lt 60 ] && echo "${1}s" || echo "$(( $1 / 60 ))m"; }
 
 # --- one probe, the fixed-interval mode ---
 if [ "$1" != "--wait" ]; then
-  probe || echo "NO - $NOREASON"
+  probe || { echo "NO - $NOREASON"; sweep_due && sweep_line; }
   exit 0
 fi
 
@@ -1059,9 +1096,18 @@ while :; do
     fi
   fi
   now=$(date +%s)
+  # The hour is up and nothing else woke the model: wake for the sweep alone,
+  # unless one such wake went unanswered in the last SWEEP_REWAKE seconds.
+  if sweep_due && [ $(( now - $(cat "$SWEEP_SHOWN" 2>/dev/null || echo 0) )) -ge "$SWEEP_REWAKE" ]; then
+    printf '%s' "$now" > "$SWEEP_SHOWN"
+    sweep_line
+    echo "--- sweep due after $(dur $(( now - started ))) ---"
+    exit 0
+  fi
   if [ $(( now - started )) -ge "$WAIT_MAX" ]; then
     # Never wait forever. A bounded waiter that dies costs one idle turn; an
     # unbounded one that dies costs the whole night.
+    sweep_due && sweep_line
     echo "--- still nothing after $(dur $(( now - started ))), re-arm ---"
     exit 0
   fi

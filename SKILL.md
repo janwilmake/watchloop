@@ -40,6 +40,8 @@ and every tick read it:
 | `LO_INBOX_EMAIL`      | `INBOX_EMAIL`       | the Hyre mailbox to watch (default empty: the inbox watch is off). Needs a Claude Code MCP server named `hyre` and the Slack watch |
 | `LO_INBOX_USER_ID`    | `INBOX_USER_ID`     | that person's Hyre user id; adds their meetings and calls to the watch |
 | `LO_INBOX_SLACK_USER` | `INBOX_SLACK_USER`  | the Slack user id that gets the DM |
+| `LO_SWEEP`            | `SWEEP_ON`          | `1` to sweep mail, messages and the calendar once an hour (default `0`) |
+| `LO_SWEEP_EVERY`      | `SWEEP_EVERY`       | seconds between sweeps (default `3600`) |
 | `LO_BUDGET_WEEK` | — | USD at list price that `lo-usage.sh` counts as 100% of the week (default `7000`) |
 | `LO_USAGE_WEEK_RESET` | — | when the plan's week resets, read off `/usage`, e.g. `mon 09:00`; empty = the last 7 days |
 | `LO_WEEKLY_CHANNEL` | — | Slack channel id for the weekly report; empty = no report. Needs `LO_USAGE_WEEK_RESET` and `LO_SLACK=1` |
@@ -167,9 +169,13 @@ STACK: [ … ]             # of those, the ones based on another branch
 RESTACK: [ … ]           # stack layers behind their base, with how far
 ADOPT: [ … ]             # PRs by LO_ADOPT_AUTHORS, each with what it needs
 TODO-CANDIDATES: ID,ID   # eligible Todo ids (only when slots>0)
+SWEEP-DUE: last sweep 63m ago - …   # LO_SWEEP=1 and the hour is up (2m)
 ```
 
-- **On a `NO` line, end the tick** and report the reason the gate gave.
+- **On a `NO` line, end the tick** and report the reason the gate gave, unless a
+  `SWEEP-DUE` line follows it: then do 2m first.
+- **`--- sweep due after 40m ---`** with a `SWEEP-DUE` line — nothing else woke
+  the loop, the hour is up: do 2m, arm the next waiter, end the tick.
 - **`linear not read` is literal** — the gate reads Linear only when a slot
   exists, so a `NO` at `slots=0` says nothing about the board. Repeat that line.
 - **If the waiter woke this tick, read its output file by path.** The task
@@ -728,6 +734,43 @@ ticket. The DM is a Slack thread like any other: when the person replies with a
 question or orders a ticket there, 2s handles it.
 
 **End with `gate.sh --inbox-ack`**, after the cache is written.
+
+#### 2m — Sweep mail, messages and the calendar
+
+Optional, and off until `LO_SWEEP=1`. Slack wants an answer within minutes;
+mail and the calendar are fine read once an hour. So the gate reads none of
+them: it says `SWEEP-DUE` on any wake once an hour has passed since the last
+sweep, and in `--wait` wakes for the sweep alone when nothing else did. The
+sweep needs no slot. Do it after anything a person is waiting on (2a, 2s), in
+the same tick.
+
+**When the project has a `sweep` skill** (a Remo's mind has one), follow it.
+Otherwise:
+
+1. **Mail and messages since the last sweep**, with whatever tools this session
+   has: the `hyre` server (its emails, LinkedIn and WhatsApp messages), Gmail,
+   Outlook. Skip what is not for a person: newsletters, tool notifications,
+   receipts, automatic replies.
+2. **Act on what is plainly this session's job** within its agent guide and
+   the rules under Permissions; never send mail to anyone outside the team
+   on your own, only drafts. **Tell the person the rest** in one Slack DM, to
+   `INBOX_SLACK_USER` when it is set: the shortest message that carries
+   everything useful, one line per item, each with its link.
+3. **The calendar:** invites to answer, and meetings in the next two hours.
+   Answer an invite only where the agent guide says this session decides;
+   otherwise put it in the DM. When screenless is installed and this session
+   should be in a meeting of the next two hours, send its bot once:
+   `screenless meet <link> --at <start> --purpose "<one line>"`. Screenless
+   prepares it half an hour before.
+4. **Remember what you handled** in
+   `~/.claude/linear-orchestrator/<PREFIX>-sweep.json`
+   (`{"last": "<ISO time>", "handled": ["<id>", …]}`, the last 500 ids), so the
+   next sweep does not act twice. When the file is missing, sweep only the
+   last hour.
+5. **End with `gate.sh --swept`**, after the cache is written. A sweep that
+   stops halfway is asked for again on the next wake.
+
+A sweep that finds nothing is one short turn: say so in one line.
 
 #### 2b — De-gate
 
