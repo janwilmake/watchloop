@@ -1083,7 +1083,7 @@ slot as `cca` does: record it in `SLACK_CACHE`. `lo-research.sh rules [--data]
 
 | | 2s, no `--data` | 2s or 2i with `--data` | 2t (`--intercom --data`) |
 | --- | --- | --- | --- |
-| the repo copy: Read, Grep, Glob, read-only `git` and `gh` | yes | yes | yes |
+| the repo copy and `/tmp`: Read, Grep, Glob, read-only `git` and `gh`, and a plain read-only command such as `ls` or `cat`, which Claude Code allows inside the Read paths by itself | yes | yes | yes |
 | Linear, Slack and Hyre staging: the read tools | yes | yes | yes |
 | Hyre production and Axiom: the read tools | no | yes | yes |
 | Intercom: the read tools | no | no | yes |
