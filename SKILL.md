@@ -42,13 +42,13 @@ and every tick read it:
 | `LO_INBOX_SLACK_USER` | `INBOX_SLACK_USER`  | the Slack user id that gets the DM |
 | `LO_SWEEP`            | `SWEEP_ON`          | `1` to sweep mail, messages and the calendar once an hour (default `0`) |
 | `LO_SWEEP_EVERY`      | `SWEEP_EVERY`       | seconds between sweeps (default `3600`) |
+| `LO_SCHEDULES` | `SCHEDULES_DIR` | the folder of scheduled jobs in the repo (default `.agents/schedules`), read from `origin/<LO_BASE>`; see 2r |
+| `LO_SCHEDULES_FETCH` | — | seconds between two fetches of `origin/<LO_BASE>` for the jobs (default `900`) |
 | `LO_BUDGET_WEEK` | — | USD at list price that `lo-usage.sh` counts as 100% of the week (default `7000`) |
 | `LO_USAGE_WEEK_RESET` | — | when the plan's week resets, read off `/usage`, e.g. `mon 09:00`; empty = the last 7 days |
 | `LO_WEEKLY_CHANNEL` | — | Slack channel id for the weekly report; empty = no report. Needs `LO_USAGE_WEEK_RESET` and `LO_SLACK=1` |
 | `LO_INTERCOM_CHANNEL` `LO_INTERCOM_DISCUSSION` | — | the Slack channel where a bot posts each new Intercom conversation, and the channel where the loop opens one research thread per conversation (2t); empty = off |
 | `LO_PERMISSIONS` | `PERMISSIONS_FILE` | the shared permissions file (default `<LO_REPO>/.agents/permissions.md`). When it exists, it replaces the five `LO_SLACK_*_EMAILS` lists; see "Permissions" below |
-| `LO_SCHEDULES` | `SCHEDULES_DIR` | the folder of scheduled jobs in the repo (default `.agents/schedules`), read from `origin/<LO_BASE>`; see 2r |
-| `LO_SCHEDULES_FETCH` | — | seconds between two fetches of `origin/<LO_BASE>` for the jobs (default `900`) |
 
 ### Permissions
 
