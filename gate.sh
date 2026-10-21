@@ -14,6 +14,7 @@
 #                      event-driven loop. Run it with run_in_background: the
 #                      exit is what wakes the model, so a quiet night costs no
 #                      turns at all instead of one every 5 minutes.
+#   gate.sh --permissions  print the permissions file as merged on origin/BASE.
 #
 # Why a state hash: 94 consecutive ticks one night printed the same numbers and
 # changed nothing. The model only needs to wake when the *world* changed, not
@@ -341,6 +342,38 @@ if [ "$1" = "--swept" ]; then
   date +%s > "$SWEEP_AT"
   echo "sweep marked done; next one due in $(( SWEEP_EVERY / 60 ))m"
   exit 0
+fi
+
+# --- Permissions: the merged file, never the working tree ---
+# The permissions file must change only through a PR that a person merges. A
+# checkout is a working copy: a branch checked out by hand, or an edit nobody
+# committed, would widen who may ask for what at once. So when the file lies in
+# a git checkout, read it from that checkout's origin/BASE, after a fetch. A
+# fetch leaves the working tree alone, so it is safe on a dirty checkout too. A
+# file outside any checkout is the operator's own, like .env: read it as is.
+PERMISSIONS="${LO_PERMISSIONS:-$REPO/.agents/permissions.md}"
+
+# permissions_show: print the file and return 0, or print the reason on stderr
+# and return 1. A 1 means: fall back to the LO_SLACK_*_EMAILS lists.
+permissions_show() {
+  local dir rel
+  dir=$(dirname "$PERMISSIONS")
+  [ -d "$dir" ] || { echo "permissions: $PERMISSIONS is missing" >&2; return 1; }
+  # Git resolves symlinks itself, so a link into a checkout still reads as one.
+  if ! rel=$(git -C "$dir" rev-parse --show-prefix 2>/dev/null); then
+    [ -f "$PERMISSIONS" ] || { echo "permissions: $PERMISSIONS is missing" >&2; return 1; }
+    cat "$PERMISSIONS"; return 0
+  fi
+  rel="$rel$(basename "$PERMISSIONS")"
+  # A failed fetch keeps the last origin/BASE: that is still a merged file.
+  git -C "$dir" fetch --quiet origin "$BASE" 2>/dev/null \
+    || echo "permissions: fetch of origin/$BASE failed; using the last one fetched" >&2
+  git -C "$dir" show "origin/$BASE:$rel" 2>/dev/null \
+    || { echo "permissions: $rel is not on origin/$BASE" >&2; return 1; }
+}
+
+if [ "$1" = "--permissions" ]; then
+  permissions_show; exit $?
 fi
 
 MODE=once

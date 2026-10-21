@@ -46,7 +46,7 @@ and every tick read it:
 | `LO_USAGE_WEEK_RESET` | — | when the plan's week resets, read off `/usage`, e.g. `mon 09:00`; empty = the last 7 days |
 | `LO_WEEKLY_CHANNEL` | — | Slack channel id for the weekly report; empty = no report. Needs `LO_USAGE_WEEK_RESET` and `LO_SLACK=1` |
 | `LO_INTERCOM_CHANNEL` `LO_INTERCOM_DISCUSSION` | — | the Slack channel where a bot posts each new Intercom conversation, and the channel where the loop opens one research thread per conversation (2t); empty = off |
-| `LO_PERMISSIONS` | `PERMISSIONS_FILE` | the shared permissions file (default `<LO_REPO>/.agents/permissions.md`). When it exists, it replaces the five `LO_SLACK_*_EMAILS` lists; see "Permissions" below |
+| `LO_PERMISSIONS` | `PERMISSIONS_FILE` | the shared permissions file (default `<LO_REPO>/.agents/permissions.md`), read as merged on `origin/BASE_BRANCH` through `gate.sh --permissions`. When it exists, it replaces the five `LO_SLACK_*_EMAILS` lists; see "Permissions" below |
 
 ### Permissions
 
@@ -94,6 +94,13 @@ merges a PR that touches `PERMISSIONS_FILE` on an order from Slack, whoever
 gives it, and it never edits the file itself. A file that is missing or that
 does not parse makes the loop fall back to the five `LO_SLACK_*_EMAILS` lists
 in `.env`, never to a wider rule.
+
+**Read the file only with `gate.sh --permissions`**, never with `cat` or the Read
+tool. The script fetches and prints the file as merged on `origin/BASE_BRANCH`.
+The copy in the working tree can hold an edit nobody merged: a branch checked
+out by hand, or an agent's change. That copy must never widen who may ask for
+what. A file outside any git checkout prints as it is on disk. A non-zero exit
+means that the file is missing: fall back to the `.env` lists.
 
 Fixed: `TRACKER` Linear MCP · `FORGE` GitHub (`gh`) · `AGENT_GUIDE` your repo's
 `CLAUDE.md` · `READY_STATUS` `Todo`, then `Backlog` only when `ALLOW_BACKLOG=1` ·
