@@ -36,6 +36,11 @@ TEAM="${LO_TEAM:-Your Team}"        # Linear team name
 PREFIX="${LO_PREFIX:-XXX}"          # ticket id prefix, e.g. HYR2
 TIER1="${LO_TIER1:-}"               # preferred assignee DISPLAY name
 TIER2="${LO_TIER2:-}"               # fallback assignee display name
+# The same two people by Linear user id. A display name is a free text field:
+# a member who renames to the loop's assignee would get tickets taken. When an
+# id is set, the gate matches the id and ignores the name of that tier.
+TIER1_ID="${LO_TIER1_ID:-}"
+TIER2_ID="${LO_TIER2_ID:-}"
 # Two opt-in widenings, both OFF by default. Unassigned and Backlog are work
 # nobody handed to this loop: somebody who moves a ticket to Todo and puts a
 # name on it has decided it is ready, and that decision is the whole signal.
@@ -116,19 +121,24 @@ LINEAR_ERR=""
 linear_ids() {
   local tj
   tj=$("$AC" call linear list_issues \
-    --json "{\"team\":\"$TEAM\",\"state\":\"$1\",\"includeArchived\":false,\"fields\":[\"assignee\",\"archivedAt\",\"status\"]}" \
+    --json "{\"team\":\"$TEAM\",\"state\":\"$1\",\"includeArchived\":false,\"fields\":[\"assignee\",\"assigneeId\",\"archivedAt\",\"status\"]}" \
     --text 2>/dev/null)
   if [ -z "$tj" ]; then
     LINEAR_ERR="linear query failed (token expired? claude mcp login linear)"
     return 0
   fi
   printf '%s' "$tj" | jq -r --arg t1 "$TIER1" --arg t2 "$TIER2" \
+    --arg i1 "$TIER1_ID" --arg i2 "$TIER2_ID" \
     --argjson unassigned "$([ "$ALLOW_UNASSIGNED" = 1 ] && echo true || echo false)" '
-    ([$t1, $t2] | map(select(. != null and . != ""))) as $tiers
+    # Per tier: its id when set, else its name. An empty tier matches nothing.
+    ([ (if $i1 != "" then {id: $i1} elif $t1 != "" then {name: $t1} else empty end),
+       (if $i2 != "" then {id: $i2} elif $t2 != "" then {name: $t2} else empty end) ]) as $tiers
     | [ .issues[]?
         | select(.archivedAt == null)
         | (.assignee // "") as $a
-        | select( ($unassigned and $a == "") or ($tiers | index($a) != null) )
+        | (.assigneeId // "") as $ai
+        | select( ($unassigned and $a == "" and $ai == "")
+                  or ($tiers | any(.id == $ai and $ai != "" or .name == $a and $a != "")) )
         | .id ] | sort | join(",")' 2>/dev/null
 }
 
@@ -232,8 +242,20 @@ slack_read() {
     # every alert, for the tick to skip it. Drop bot messages from the
     # fingerprint, but keep their "Thread:" line, so a person who replies under
     # an alert is still seen.
+    # The header is "=== Message from <display name> [<email>] (<id>) at <time> ===".
+    # Judge the author by the id and the email at the END of the line only: the
+    # display name is free text, and a person who puts "botuser-" or
+    # "slack-bots.com" in it must not drop out of the fingerprint. A bot is a
+    # B… id, Slackbot, or a bot user, whose email Slack sets on slack-bots.com.
     quiet=$(printf '%s' "$out" | jq -r '.messages // empty' 2>/dev/null | awk '
-      /^=== Message from / { bot = ($0 ~ /slack-bots\.com|botuser-/) }
+      /^=== Message from / {
+        bot = 0
+        if (match($0, /(<[^<>]*> )?\([A-Z0-9]+\) at [^()<>]*===[ ]*$/)) {
+          tail = substr($0, RSTART, RLENGTH)
+          id = tail; sub(/^.*\(/, "", id); sub(/\).*$/, "", id)
+          bot = (id ~ /^B/ || id == "USLACKBOT" || tail ~ /^<[^<>]*@slack-bots\.com> /)
+        }
+      }
       !bot || /^Thread: / { print }')
     [ -n "$quiet" ] && out="$quiet"
     SLACK_SIGS=$(printf '%s' "$SLACK_SIGS" | jq -c --arg k "$ch" \
