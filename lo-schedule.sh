@@ -111,10 +111,13 @@ def parse(text):
             errs.append(f"line {n}: a tab in the indent"); continue
         if ind == 0:
             m = re.match(r"^([a-z_]+):(.*)$", s)
+            key, sub = None, None
             if not m or m.group(1) not in KEYS:
                 errs.append(f"line {n}: unknown key or shape: {s}"); continue
-            key, sub = m.group(1), None
+            key = m.group(1)
             v = m.group(2).strip()
+            if key in ("permissions", "outputs"):
+                v = re.sub(r"(^|\s+)#.*$", "", v).strip()
             if key == "permissions":
                 if v and v != "{}":
                     errs.append(f"line {n}: permissions takes an indented block"); continue
@@ -125,11 +128,11 @@ def parse(text):
                 meta[key] = []
             else:
                 meta[key] = scalar(v)
-        elif key == "outputs" and s.startswith("- "):
+        elif key == "outputs" and key in meta and s.startswith("- "):
             meta["outputs"].append(unquote(s[2:]))
-        elif key == "permissions" and ind == 2 and re.match(r"^(allow|deny):\s*(\[\])?\s*$", s):
+        elif key == "permissions" and ind == 2 and re.match(r"^(allow|deny):\s*(\[\])?\s*(#.*)?$", s):
             sub = s.split(":")[0]
-        elif key == "permissions" and sub and ind >= 4 and s.startswith("- "):
+        elif key == "permissions" and key in meta and sub and ind >= 4 and s.startswith("- "):
             rule = unquote(s[2:])
             if not rule:
                 errs.append(f"line {n}: an empty rule"); continue
