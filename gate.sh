@@ -936,7 +936,7 @@ probe() {
     if [ ! -f "$QUEUE" ]; then queue_stale=yes
     else
       built=$(jq -r '.builtAt // ""' "$QUEUE" 2>/dev/null)
-      age=$(( $(date +%s) - $(iso_epoch "${built%.*}Z" 2>/dev/null || echo 0) ))
+      age=$(( $(date +%s) - $(built="${built%Z}"; iso_epoch "${built%.*}Z" 2>/dev/null || echo 0) ))
       [ "$age" -gt 1800 ] && queue_stale=yes
     fi
   fi
