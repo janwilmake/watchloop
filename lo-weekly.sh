@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lo-weekly.sh — the weekly report: plan usage per project, PRs merged into the
-# base branch, and the lines they changed, for the week that ended at the last
-# LO_USAGE_WEEK_RESET.
+# base branch, the lines they changed, and the last run of each scheduled job,
+# for the week that ended at the last LO_USAGE_WEEK_RESET.
 #
 #   lo-weekly.sh          prints the report (Markdown) when one is due, else nothing
 #   lo-weekly.sh --done   records that the due report was posted
@@ -18,10 +18,10 @@ dir="$HOME/.claude/watchloop"
 mkdir -p "$dir"
 usage=$("$here/lo-usage.sh" --json)
 
-python3 -I - "$dir/${LO_PREFIX:-LO}-weekly.json" "${1:-}" "${LO_REPO:-$PWD}" "${LO_BASE:-dev}" "$usage" <<'PY'
+python3 -I - "$dir/${LO_PREFIX:-LO}-weekly.json" "${1:-}" "${LO_REPO:-$PWD}" "${LO_BASE:-dev}" "$usage" "$here" <<'PY'
 import datetime as dt, json, subprocess, sys
 
-state_path, mode, repo, base, usage = sys.argv[1:6]
+state_path, mode, repo, base, usage, here = sys.argv[1:7]
 lw = json.loads(usage).get("last_week")
 if not lw:
     sys.exit(0)
@@ -69,5 +69,11 @@ for name, usd in list(lw["by_project"].items())[:10]:
     lines.append(f"  - {name} · ${usd:,.0f}")
 lines.append(f"- **PRs merged into `{base}`:** {len(prs)} ({by_loop} opened by the loop).")
 lines.append(f"- **Lines:** +{added:,} added · −{removed:,} removed · net {'+' if net >= 0 else '−'}{abs(net):,}.")
+# The last run of each scheduled job this week, from lo-schedule.sh.
+import os
+sched = subprocess.run([os.path.join(here, "lo-schedule.sh"), "report"], capture_output=True, text=True).stdout.rstrip()
+if sched:
+    lines.append("- **Scheduled jobs:**")
+    lines.append(sched)
 print("\n".join(lines))
 PY

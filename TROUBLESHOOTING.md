@@ -115,6 +115,21 @@ to `SKILL.md`. The tick itself does not read this.
 - **Linux: no agent windows.** Each agent runs in a `screen` session; `screen -ls`
   lists them and `screen -r agent-N` watches one. Install `screen`, `jq` and `gh`.
 
+## A scheduled job did not run
+
+Run `~/.claude/skills/watchloop/lo-schedule.sh list`. It names the cause:
+
+- **`INVALID: …`** — the front matter did not parse. The job never runs
+  half-read. Check it with `lo-schedule.sh check <file.md>` before you merge.
+- **The job is not listed** — it is not on `origin/<LO_BASE>` yet. The loop
+  reads only merged jobs, and fetches at most every `LO_SCHEDULES_FETCH`
+  seconds.
+- **`last` is older than the last run time, and nothing ran** — no slot was free
+  inside the `late` window. Widen `late`, or give the loop more RAM.
+- **`ended without a report`** — the agent stopped before
+  `lo-schedule.sh done`. Read its transcript; the most common cause is a tool
+  its allowlist refused. Add the rule to the job's `permissions` in a PR.
+
 ## The loop stalls with `load N over 10.0` and almost no agents running
 
 An agent left background processes behind. Seen twice, both times a load

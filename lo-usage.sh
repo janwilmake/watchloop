@@ -3,7 +3,8 @@
 #
 #   lo-usage.sh [--json]                        windows + this week's spend by project
 #   lo-usage.sh tag <session-uuid> <ticket|-> [--kind <kind>] [--pr <n>]
-#                                               ("-": work with no ticket, e.g. --kind 2s)
+#                                               ("-": work with no ticket, e.g. --kind 2s,
+#                                               or --kind 2r for a scheduled job)
 #
 # Reads every Claude Code transcript on this machine (~/.claude/projects), the
 # user's own sessions as well as the agents', because they all draw on the same
@@ -219,6 +220,8 @@ def attribute(sid, s):
         project = "watchloop (loop)"
     elif not ticket and agent and research:
         project = "watchloop (slack research)"
+    elif not ticket and agent and tag.get("kind") == "2r":
+        project = "watchloop (schedules)"
     elif not ticket and agent:
         project = "watchloop (agents)"
     elif not ticket:

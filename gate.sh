@@ -269,6 +269,12 @@ INBOX_SHOWN=~/.claude/watchloop/gate-inbox-shown.json   # the kinds of the last 
 INBOX_ERR=""
 INBOX_SIGS='{}'
 
+# --- Schedules: recurring agent jobs declared in the repo ---
+# lo-schedule.sh reads `.agents/schedules/*.md` from origin/<BASE> and says which
+# jobs are due; the gate only passes that on. What the model was last shown is
+# kept apart, like DSTATE: a due job wakes the loop once, not on every probe.
+SCSTATE=~/.claude/watchloop/gate-schedules-state
+
 # inbox_read [fresh]: fill INBOX_SIGS with {emails, meetings, calls: fingerprint}.
 # A read that fails leaves its key out, so an outage never reads as a change.
 inbox_read() {
@@ -834,6 +840,22 @@ probe() {
   inboxsig=$(printf '%s' "$inbox" | hash16)
   previnbox=$(cat "$ISTATE" 2>/dev/null)
 
+  # --- Schedules: jobs whose run time has come (lo-schedule.sh) ---
+  # Read at any slot count, so a NO line can say a job waits for a slot. A peek
+  # does not fetch: it reads origin/<BASE> as the last fetch left it.
+  sched='[]'
+  sjson=$("$SELF/lo-schedule.sh" due $([ "$PEEK" = 1 ] && echo --no-fetch) 2>&1)
+  if printf '%s' "$sjson" | jq -e '.due | type == "array"' >/dev/null 2>&1; then
+    sched=$(printf '%s' "$sjson" | jq -c '.due')
+    serr=$(printf '%s' "$sjson" | jq -r '.errors | join("; ")')
+    [ -n "$serr" ] && notes="$notes${notes:+; }schedules: $serr"
+  else
+    notes="$notes${notes:+; }schedules unreadable: $(printf '%s' "$sjson" | tail -1 | cut -c1-120)"
+  fi
+  n_sched=$(printf '%s' "$sched" | jq 'length')
+  schedsig=$(printf '%s' "$sched" | hash16)
+  prevsched=$(cat "$SCSTATE" 2>/dev/null)
+
   # --- Linear ready column, but only when a slot could take it ---
   # Cheap pre-filter (assignee tier + not archived); the model still applies the
   # judgment drop-rules and dedups against open PRs. New candidate -> hash change.
@@ -937,6 +959,8 @@ probe() {
   # Slack wakes once per change. The tick clears it with --slack-ack.
   [ "$n_slack" -gt 0 ] && [ "$slacksig" != "$prevslack" ] && work=yes
   [ "$n_inbox" -gt 0 ] && [ "$inboxsig" != "$previnbox" ] && work=yes
+  # A due job is agent work: it waits for a slot, and wakes once per change.
+  [ "$slots" -gt 0 ] && [ "$n_sched" -gt 0 ] && [ "$schedsig" != "$prevsched" ] && work=yes
   # A draft already surfaced on a prior probe is not work again on its own — only
   # a draft whose verdict actually changed since the state file was last saved.
   # Without the hash check, a draft the model has already looked at and can do
@@ -979,6 +1003,7 @@ probe() {
       why="no slot: $why"
       [ "$n_drafts" -gt 0 ] && why="$why; $n_drafts draft(s) waiting"
       [ "$n_adopt" -gt 0 ] && why="$why; $n_adopt adopted PR(s) waiting"
+      [ "$n_sched" -gt 0 ] && why="$why; $n_sched schedule(s) due"
       # Linear is queried only when a slot exists, so at slots=0 a new ticket is
       # invisible to this gate by design. Say so, or the NO reads as "no work".
       why="$why; linear not read"
@@ -1013,6 +1038,7 @@ probe() {
       [ "$PEEK" = 1 ] || printf '%s' "$slacksig" > "$SLSTATE"
       [ "$PEEK" = 1 ] || printf '%s' "$fbsig" > "$FSTATE"
       [ "$PEEK" = 1 ] || printf '%s' "$inboxsig" > "$ISTATE"
+      [ "$PEEK" = 1 ] || printf '%s' "$schedsig" > "$SCSTATE"
       return 1
     fi
   fi
@@ -1024,6 +1050,7 @@ probe() {
   [ "$PEEK" = 1 ] || printf '%s' "$slacksig" > "$SLSTATE"
   [ "$PEEK" = 1 ] || printf '%s' "$fbsig" > "$FSTATE"
   [ "$PEEK" = 1 ] || printf '%s' "$inboxsig" > "$ISTATE"
+  [ "$PEEK" = 1 ] || printf '%s' "$schedsig" > "$SCSTATE"
 
   # --- otherwise: everything the model needs, nothing it does not ---
   echo "load1=$load freegb=$freegb diskgb=$diskgb busy=$busy slots=$slots max=$max_agents$capnote"
@@ -1042,6 +1069,7 @@ probe() {
   [ "$n_stack"   -gt 0 ]    && echo "STACK: $stack"
   [ "$n_restack" -gt 0 ]    && echo "RESTACK: $restack"
   [ "$n_adopt"   -gt 0 ]    && echo "ADOPT: $adopt"
+  [ "$n_sched"   -gt 0 ]    && echo "SCHEDULES-DUE: $sched"
   [ "$slots" -gt 0 ] && [ -n "$todo_ids" ] && echo "TODO-CANDIDATES: $todo_ids (from ${todo_source:-Todo})"
   [ "$queue_stale" = yes ]  && echo "queue: stale, rebuild before 2d"
   sweep_due && sweep_line
