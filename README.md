@@ -84,9 +84,12 @@ constraints are real:
 - **A Linux server has no real Chrome.** Its agents run in `screen` sessions
   without Claude in Chrome, so they test front-end work with headless Playwright.
 - **One machine.** Parallelism caps at what one laptop's memory holds.
-- **`--dangerously-skip-permissions` is required.** The agents run unattended with
-  permission prompts off. That is the point, and it is also the risk — give the
-  loop a repo where the worst an agent can do is open a bad PR.
+- **Coding agents run with `--dangerously-skip-permissions`.** They run
+  unattended with permission prompts off, and without WebFetch, WebSearch or any
+  send to a customer. That is the point, and it is also the risk — give the
+  loop a repo where the worst an agent can do is open a bad PR. A research
+  agent, which reads Slack, Intercom and mail, and a scheduled job run on an
+  allowlist instead: `lo-research.sh` and `lo-schedule.sh` build it.
 - **Your repo needs its own agent guide** (`CLAUDE.md`). The prompt handed to each
   agent is short *because* the guide supplies branching, local checks, the PR
   template, testing and security.

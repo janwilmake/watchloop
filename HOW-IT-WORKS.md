@@ -86,6 +86,34 @@ Three rules keep it safe to leave running:
 The agent's last command is `lo-schedule.sh done <name> "<one line>"`, and the
 weekly report lists each job's last run with that line.
 
+## Research agents — an allowlist, and one thread to post in
+
+A research agent answers a Slack thread, an Intercom conversation or an inbox
+item. Its prompt carries text that a customer or another outside person wrote,
+and that text can try to steer it. So the prompt is not what limits it:
+
+```
+$ lo-research.sh run --channel C0C9KG12WUU --thread 1792000000.000100 --kind 2t --intercom --data <<<"…"
+agent-4 -> /Users/you/.claude/agents/agent-4
+```
+
+- **It reads, and posts in one thread.** `lo-research.sh` builds an allowlist
+  with `lo-allowlist.sh`: the read tools of Linear, Slack and Hyre staging, the
+  repo copy, read-only `git` and `gh`. Production and Axiom come only with
+  `--data`, Intercom only with `--intercom`. The one post is
+  `lo-research.sh reply <channel> <thread> <run dir> <file>`, and its allow rule
+  names the channel and the thread, so no other post can pass.
+- **It has no way out.** No WebFetch, no browser, no `curl`, no send to a
+  customer, no draft, no `.env`. An ordered Intercom reply and a draft are the
+  tick's, which reads the order itself.
+- **`git` goes through a wrapper.** `git grep -O<cmd>` runs a program and
+  `git diff --no-index` reads any file, so `lo-research.sh git` refuses those
+  flags.
+
+Coding agents keep skipped permissions, because they need `npm`, `git push` and
+a browser. They lose WebFetch, WebSearch and every customer-facing send through
+`--disallowedTools="$(lo-research.sh deny)"`.
+
 ## When a run looks wrong
 
 [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md) carries the failure modes seen on

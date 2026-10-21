@@ -134,6 +134,21 @@ Run `~/.claude/skills/watchloop/lo-schedule.sh list`. It names the cause:
   `lo-schedule.sh done`. Read its transcript; the most common cause is a tool
   its allowlist refused. Add the rule to the job's `permissions` in a PR.
 
+## A research agent posted nothing, or said a tool was refused
+
+A research agent runs on an allowlist (`lo-research.sh`), so a refused call is
+expected, not a fault. Print what it had with
+`lo-research.sh rules [--data] [--intercom]`.
+
+- **"needs customer data"** in the answer — the run had no `--data`. The tick
+  adds it only for an asker whose mode allows customer data.
+- **Nothing in the thread** — the agent wrote its reply but `reply` refused it:
+  a file over 5000 characters, a name with a slash, or `LO_INTERCOM_CHANNEL` as
+  the channel. The refusal is in the agent's transcript.
+- **A tool it really needs** — add the read tool to the lists at the top of
+  `lo-research.sh` in a PR. Never add a send, a fetch or a program runner: the
+  thread text is outside text.
+
 ## The loop stalls with `load N over 10.0` and almost no agents running
 
 An agent left background processes behind. Seen twice, both times a load
