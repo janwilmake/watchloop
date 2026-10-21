@@ -54,6 +54,38 @@ Set `LO_FEEDBACK_SINCE` to the day you install this. Comments older than it were
 written before marking began, so they carry no marker and would all read as
 instructions.
 
+## Scheduled jobs — a file in the repo, an allowlist per job
+
+```
+$ lo-schedule.sh list
+security-weekly   0 7 * * mon   Europe/Amsterdam   next 2026-10-26T06:00Z · last 2026-10-19T06:00Z · done: 3 tickets, #2601
+```
+
+A job is `.agents/schedules/<name>.md` in your repo: YAML front matter
+(`schedule`, `timezone`, `late`, `model`, `permissions`, `outputs`) and the
+prompt as the body. The shape follows GitHub Agentic Workflows. There is no
+timer and no cron daemon: the gate already probes every minute, so it asks
+`lo-schedule.sh due` on each probe. That is shell and a short Python, no
+model.
+
+Three rules keep it safe to leave running:
+
+- **The job is read from `origin/<base>`, never the working tree.** An edit
+  nobody merged cannot change what an agent may do.
+- **The run is written down before the agent starts.** The state file records
+  the run time it was started for, so the next probe never starts it again,
+  also when the agent dies. A run that found no free slot inside its `late`
+  window is skipped, not caught up.
+- **The agent gets an allowlist, not skipped permissions.** `lo-allowlist.sh`
+  turns the job's `permissions` into a settings file, and
+  `cca --allowlist` runs the agent with it in `dontAsk` mode: a tool call
+  outside the list is refused at once and never waits for an answer. The front
+  matter parser takes only a small, strict part of YAML; a file it does not
+  understand does not run at all, because a deny rule read wrong is a hole.
+
+The agent's last command is `lo-schedule.sh done <name> "<one line>"`, and the
+weekly report lists each job's last run with that line.
+
 ## When a run looks wrong
 
 [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md) carries the failure modes seen on

@@ -42,6 +42,8 @@ and every tick read it:
 | `LO_INBOX_SLACK_USER` | `INBOX_SLACK_USER`  | the Slack user id that gets the DM |
 | `LO_SWEEP`            | `SWEEP_ON`          | `1` to sweep mail, messages and the calendar once an hour (default `0`) |
 | `LO_SWEEP_EVERY`      | `SWEEP_EVERY`       | seconds between sweeps (default `3600`) |
+| `LO_SCHEDULES` | `SCHEDULES_DIR` | the folder of scheduled jobs in the repo (default `.agents/schedules`), read from `origin/<LO_BASE>`; see 2r |
+| `LO_SCHEDULES_FETCH` | — | seconds between two fetches of `origin/<LO_BASE>` for the jobs (default `900`) |
 | `LO_BUDGET_WEEK` | — | USD at list price that `lo-usage.sh` counts as 100% of the week (default `7000`) |
 | `LO_USAGE_WEEK_RESET` | — | when the plan's week resets, read off `/usage`, e.g. `mon 09:00`; empty = the last 7 days |
 | `LO_WEEKLY_CHANNEL` | — | Slack channel id for the weekly report; empty = no report. Needs `LO_USAGE_WEEK_RESET` and `LO_SLACK=1` |
@@ -176,6 +178,7 @@ STACK: [ … ]             # of those, the ones based on another branch
 RESTACK: [ … ]           # stack layers behind their base, with how far
 ADOPT: [ … ]             # PRs by LO_ADOPT_AUTHORS, each with what it needs
 TODO-CANDIDATES: ID,ID   # eligible Todo ids (only when slots>0)
+SCHEDULES-DUE: [ … ]     # scheduled jobs whose run time has come, each {name, slot} (2r)
 SWEEP-DUE: last sweep 63m ago - …   # LO_SWEEP=1 and the hour is up (2m)
 ```
 
@@ -220,9 +223,11 @@ above is empty.
    waiting in both cases. A new Intercom conversation (2t) ranks with Slack. An `INBOX` line comes right after (2i).
 2. **De-gate** — a promoted PR that stopped being mergeable or went red (2b). A
    `RESTACK` line is a de-gate too.
-3. **Finish a draft** (2c).
-4. **Look after an adopted PR** (2e).
-5. **Start a ticket** from `QUEUE_CACHE` (2d).
+3. **Run a due scheduled job** (2r). It has a deadline, its `late` window; a
+   draft does not.
+4. **Finish a draft** (2c).
+5. **Look after an adopted PR** (2e).
+6. **Start a ticket** from `QUEUE_CACHE` (2d).
 
 #### 2a — Act on what a person said
 
@@ -794,6 +799,42 @@ Only ever touch PRs carrying the `🌙` marker. **Keep fixing, however many time
 it takes.** If the same paths keep colliding, have the agent stop and name the
 file and whose work it fights.
 
+#### 2r — Run the due scheduled jobs
+
+A scheduled job is a file `SCHEDULES_DIR/<name>.md` in the repo: YAML front
+matter with `schedule` (cron), `timezone`, `late`, `model`, `permissions`
+(`allow` and `deny`, in Claude Code rule syntax) and `outputs`, and the prompt
+as the body. `lo-schedule.sh` reads the files from `origin/<BASE_BRANCH>`, never
+from the working tree, so a job changes only through a merged PR. The gate asks
+it every probe and prints `SCHEDULES-DUE` with the jobs whose run time has come
+and whose `late` window is still open.
+
+For each entry, while slots last, run **one** command, unsandboxed, from any
+directory:
+
+```bash
+~/.claude/skills/watchloop/lo-schedule.sh run <name>
+```
+
+It does the whole dispatch in shell: it checks again that the job is due, writes
+the run as started (so no later check starts it again), builds an allowlist
+settings file from the job's `permissions`, tags the session in the usage ledger
+(`--kind 2r`), and starts one `cca` agent with `--non-interactive --allowlist`
+in place of `--dangerously-skip-permissions`. The prompt is the job's body with
+a fixed opening; never write one of your own. Its last command is
+`lo-schedule.sh done <name> "<one line>"`, the one rule the loop adds to the
+allowlist.
+
+A run whose `late` window closed before a slot was free is not started: the job
+waits for its next run time. A job file that does not parse never runs; its
+error shows on the gate's `notes` line. `lo-schedule.sh list` shows each job,
+its next run, and how its last run ended. `lo-schedule.sh run <name> --force`
+starts a run now, outside the schedule. Use it only on a person's order.
+
+**Never start a scheduled job with `--dangerously-skip-permissions`**, and
+never widen its rules: the allowlist is what a person reviewed when the job was
+merged. A job that needs a tool it lacks gets it through a PR to its file.
+
 #### 2c — Finish the drafts
 
 A draft becomes ready on five gates: a `review` entry in its log; a `fix` entry
@@ -998,6 +1039,15 @@ echo "<slot>" > ~/.claude/watchloop/dispatched/<PR#>
 `cca` prints the slot it took (`agent-1 -> …`). The gate holds the PR while that
 slot's lock lives, then deletes the marker itself — no cleanup.
 
+**An allowlist instead of skipped permissions.** `cca --allowlist <settings.json>`
+runs an agent with only the tools the file allows, in `dontAsk` mode: a call
+outside the list is refused at once, never asked, so the agent cannot stall.
+Build the file with
+`~/.claude/skills/watchloop/lo-allowlist.sh <out.json> --allow RULE… --deny RULE…`
+and pass `--allowlist <out.json>` in place of `--dangerously-skip-permissions`.
+Scheduled jobs (2r) always run this way. Any other dispatch can too, once its
+tools can be named.
+
 Two `cca` rules bite here: **there is no name argument**, and `node_modules` is a
 symlink into the user's checkout, so **no agent may run `npm install`**. See
 `~/.claude/skills/multiclaude/SKILL.md`.
@@ -1015,8 +1065,8 @@ only `/usage` knows it.
 `~/.claude/skills/watchloop/lo-weekly.sh`. It prints nothing until a
 report is due: once per week, from each `LO_USAGE_WEEK_RESET` on. Then it prints
 the report for the week that just ended: the plan usage per project, the PRs
-merged into `BASE_BRANCH` and how many the loop opened, and the lines added,
-removed and net. Post that text unchanged as a new message to
+merged into `BASE_BRANCH` and how many the loop opened, the lines added,
+removed and net, and the last run of each scheduled job (2r) with its result. Post that text unchanged as a new message to
 `LO_WEEKLY_CHANNEL` through the `slack` server, then run `lo-weekly.sh --done`.
 A post that fails gets no `--done`, so the next tick tries again.
 
@@ -1436,8 +1486,10 @@ Also list the claimed tickets
 (`list_issues(team: TRACKER_TEAM, state: CLAIMED_STATUS)`) paired with their PRs —
 a claimed ticket with no open PR and no live agent is stranded, and this is the
 only place that shows it. Report both caches' entry counts and `builtAt` age, and
-the count of open PRs carrying `INVALID_LABEL`, and the output of `lo-usage.sh`
-(the week's usage and this week's spend per project). Rebuild nothing.
+the count of open PRs carrying `INVALID_LABEL`, the output of `lo-usage.sh`
+(the week's usage and this week's spend per project), and the output of
+`lo-schedule.sh list` (each scheduled job, its next run, its last result).
+Rebuild nothing.
 
 ## Mode: stop
 

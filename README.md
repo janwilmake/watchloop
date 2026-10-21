@@ -57,6 +57,11 @@ cause and no change a user sees. The loop never merges into the default branch.
 4. **The PR leaves draft on the five gates**, or stays a draft.
 5. **Your comment re-opens any of it.** An unanswered comment on one of its PRs
    outranks every other kind of work on the next tick.
+6. **Scheduled jobs run on time.** A job is a Markdown file in your repo,
+   `.agents/schedules/<name>.md`: a cron line and an allowlist in its front
+   matter, and the prompt below. The gate sees when one is due, and the loop
+   starts one agent for it with those tools and no others. A weekly security
+   check, a weekly cleanup: one file each, merged like any other change.
 
 Every agent gets its own repo clone, Terminal window and **real Chrome**, which is
 why front-end tickets work here: the screenshots on the PR come from driving the
