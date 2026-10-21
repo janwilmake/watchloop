@@ -106,6 +106,10 @@ to `SKILL.md`. The tick itself does not read this.
   project `gh` output with `--jq`, read no ticket descriptions unless the queue
   is being rebuilt, and let step 1 end the tick in one line. A ticket cache that
   keeps expiring early is the usual cause.
+- **An edit to the permissions file has no effect.** Expected until it merges.
+  The loop reads the file with `gate.sh --permissions`, from `origin/<BASE_BRANCH>`,
+  so an edit in `REPO` or on an open PR changes nothing. Run
+  `gate.sh --permissions` to see the rules the loop uses now.
 - **A PR that merges clean but reverts something.** Its branch point predates
   the change it undoes. Check when `REPO` last fast-forwarded against when the
   branch was cut; an agent cannot see this from inside its own clone.
