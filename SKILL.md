@@ -458,7 +458,9 @@ agent. Per PR, in this order:
 1. **Check, and merge only when every line holds.** The PR is open. Its base is
    `BASE_BRANCH`; a PR against the repository's default branch or a release is
    never merged by the loop, unless a production order (below) names that PR.
-   It is not a draft. `mergeable` is `MERGEABLE`. Every
+   It is not a draft. A ready PR that still carries `## Blocked on` is merged
+   only when the order shows the person knows the block, or the notice is gone.
+   `mergeable` is `MERGEABLE`. Every
    PR that its merge-order line names ("Merge after #NNNN") is merged already,
    or is in the same order, and then goes first.
 2. **When a line fails, do not merge. Say which line, and do the part the loop
@@ -872,12 +874,14 @@ Classify each draft. **Check `## Blocked on` and the `needs human` label first**
 
 - **held** — the body carries `## Blocked on` as a heading on its own line
   (`grep -E '^## Blocked on'`, never as a substring), or the PR carries the
-  `needs human` label. **It stays a draft**: the notice or the label says what a
-  person owes, and a draft is how the team sees it is not done. The loop still
-  gives it every other gate below — review, fix, screenshot, mergeable — so it is
-  ready the moment the person answers. When the notice is gone from the body and
-  the label is removed, it is promoted like any other draft. A research PR lands
-  here by design. Never promote a held PR, and never remove its notice or label.
+  `needs human` label. **It gets every other gate below** — review, fix,
+  screenshot, mergeable — **and is promoted once they pass, like any other
+  draft.** A ready PR means "a person must look and act": merge it, or answer
+  what the notice asks. A draft means the loop is still working on it. The notice
+  or the label stays in the PR and says what the person owes; never remove
+  either. A research PR lands here by design. (The user of the Claude Code
+  session, 23 Oct 2026: "i thought waiting on a person should also be undrafted.
+  green means i need to look and do smth or merge...")
 - **needs-mergeable** — `mergeable` is `CONFLICTING`, or CI on the head commit is
   failing. `UNKNOWN` is not this state; it means ask again next tick.
 - **needs-split** — a reviewer read it and said it cannot be reviewed in one
