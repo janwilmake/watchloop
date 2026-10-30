@@ -769,7 +769,9 @@ probe() {
       | .databaseId as $i | select($acked | index($i) | not)
       | { id: $i, who: .author.login, pr: ($n|tostring), kind: "review" } ]' 2>/dev/null)
   [ -z "$rpending" ] && rpending='[]'
-  pending=$(jq -c -n --argjson a "$pending" --argjson b "$rpending" '$a + $b')
+  # Through files, not --argjson: pending carries comment bodies, and 100 of
+  # them pass the kernel's 128 KB limit on one argument ("Argument list too long").
+  pending=$(jq -c -s '.[0] + .[1]' <(printf '%s' "$pending") <(printf '%s' "$rpending"))
 
   # The acked-scan above reads ONE page of the newest repo-wide comments. On a
   # busy day the loop writes hundreds, so an ack posted hours ago rolls off the
