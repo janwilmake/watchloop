@@ -27,7 +27,7 @@ const REFUSED_WORDS =
   /\b(insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|set_config|current_setting|dblink\w*|query_to_xml\w*|table_to_xml\w*|cursor_to_xml\w*|schema_to_xml\w*|database_to_xml\w*|lo_\w+|copy|into|do|call|execute|prepare|listen|notify|lock|for\s+(update|share|no\s+key\s+update|key\s+share))\b|\bpg_\w*|\binformation_schema\b|u&["']/i;
 // A column with a secret in it, by name. Also checked on the rows that come back.
 const SECRET_NAME =
-  /(token|secret|password|passwd|cipher|encrypt|credential|api_?key|private_?key|session_?(id|key|cookie)|cookie|li_at|signature|refresh|bearer|access_key|hash)/i;
+  /(token|secret|password|passwd|cipher|encrypt|credential|api_?key|private_?key|session_?(id|key|cookie)|cookie|li_at|\bli_a\b|signature|refresh|bearer|access_key|hash)/i;
 // A whole row turned into one value carries its secret columns past the name check.
 const WHOLE_ROW =
   /\b(to_jsonb?|row_to_json|jsonb?_agg|jsonb?_object_agg|json_build\w*|jsonb_build\w*|hstore|array_to_json|xmlforest|xmlelement)\s*\(|(^|[^\w.])\w+\s*::\s*(text|varchar|character\s+varying|jsonb?|xml)\b|\bcast\s*\(\s*\w+\s+as\b|\b\w+\.\*/i;
@@ -44,7 +44,8 @@ function refusal(sql) {
   if (!/^(select|with)\b/i.test(text)) return "only SELECT or WITH";
   const word = text.match(REFUSED_WORDS);
   if (word) return `"${word[0]}" is not allowed`;
-  const secret = text.match(SECRET_NAME);
+  // Whether a secret column is filled is a fact the agent may read; its value is not.
+  const secret = text.replace(/[\w.]+\s+is\s+(not\s+)?null/gi, "").match(SECRET_NAME);
   if (secret) return `a name with "${secret[0]}" is not allowed: columns that hold secrets stay out`;
   if (WHOLE_ROW.test(text)) return "name the columns: a whole row turned into one value is not allowed";
   if (/(^|[\s,(])\*/.test(text.replace(/count\s*\(\s*\*\s*\)/gi, "")))
