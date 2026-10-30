@@ -8,6 +8,9 @@
 #                                the agent's only post: one file of its run dir, into that thread
 #   lo-research.sh git <log|show|diff|grep|blame|ls-files|status|rev-parse> [args…]
 #                                read-only git, for the agent
+#   lo-research.sh prod-read <run dir> <file name>
+#                                one read-only SELECT on production, from a file of the
+#                                run dir; only a --data run has the rule for it
 #   lo-research.sh rules [--data] [--intercom]
 #                                print the allow and deny rules a research agent gets
 #   lo-research.sh deny          the tools no agent of the loop gets, as one value
@@ -22,7 +25,8 @@
 # is refused at once (`dontAsk`), so the agent never waits for an answer.
 #
 # --data     the asker may see customer data: add the production read tools
-#            (Hyre, Axiom). Without it the agent has no tool that reads them.
+#            (Hyre, Axiom, and `prod-read` for the database). Without it the
+#            agent has no tool that reads them.
 # --intercom add the Intercom read tools (2t).
 #
 # The prompt comes on stdin, or from --prompt-file. This script puts a fixed
@@ -127,6 +131,32 @@ case "$mode" in
       esac
     done
     exec git --no-pager -c core.pager=cat -c diff.external= "$sub" "$@" ;;
+  prod-read)
+    # ~/.claude/watchloop/prod-read.conf holds LO_PROD_READ_URL (a read-only role),
+    # or LO_PROD_READ_RAILWAY_PROJECT, _SERVICE and _ENVIRONMENT. The agent cannot
+    # read that folder, and it never gets the connection string.
+    [ $# -eq 2 ] || { echo "usage: lo-research.sh prod-read <run dir> <file name>" >&2; exit 1; }
+    run=$1 name=$2
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "lo-research: file name must be a plain name" >&2; exit 1; }
+    [[ "$run" =~ ^$RUNS/[A-Za-z0-9-]+$ ]] || { echo "lo-research: $run is not a research run dir" >&2; exit 1; }
+    f="$run/$name"
+    [ -f "$f" ] && [ ! -L "$f" ] && [ ! -L "$run" ] || { echo "lo-research: no file $f" >&2; exit 1; }
+    conf="$HOME/.claude/watchloop/prod-read.conf"
+    [ -f "$conf" ] || { echo "lo-research: prod-read is not set up on this machine" >&2; exit 1; }
+    set -a; . "$conf"; set +a
+    log="$HOME/.claude/watchloop/prod-read.log"
+    # A cap per run: a steered agent must not walk through the whole database.
+    used=$(grep -c "^[^ ]* $(basename "$run") " "$log" 2>/dev/null || true)
+    [ "${used:-0}" -lt "${LO_PROD_READ_MAX:-25}" ] || { echo "lo-research: this run used its ${LO_PROD_READ_MAX:-25} reads" >&2; exit 1; }
+    node "$here/lo-prod-read.cjs" --check "$f" >/dev/null || exit $?
+    printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$(basename "$run")" "$(tr -s ' \n\t' ' ' < "$f" | cut -c1-2000)" >> "$log"
+    export LO_REPO="$REPO"
+    if [ -n "${LO_PROD_READ_URL:-}" ]; then
+      exec node "$here/lo-prod-read.cjs" "$f"
+    fi
+    exec "${RAILWAY:-$HOME/.local/bin/railway}" run --project "$LO_PROD_READ_RAILWAY_PROJECT" \
+      --service "$LO_PROD_READ_RAILWAY_SERVICE" --environment "$LO_PROD_READ_RAILWAY_ENVIRONMENT" \
+      -- node "$here/lo-prod-read.cjs" "$f" ;;
   reply)
     [ $# -eq 4 ] || { echo "usage: lo-research.sh reply <channel> <thread ts> <run dir> <file name>" >&2; exit 1; }
     ch=$1 ts=$2 run=$3 name=$4
@@ -171,6 +201,13 @@ case "$mode" in
     reply="$here/lo-research.sh reply $ch $ts $run"
     # Its own run dir only: a file another run wrote is not this agent's to post.
     args+=(--allow "Bash($reply:*)" --allow "Edit(/$run/**)")
+    prodline=""
+    case " ${flags[*]-} " in *" --data "*)
+      args+=(--allow "Bash($here/lo-research.sh prod-read $run:*)")
+      prodline="
+
+**The production database, read only.** Write one SELECT to a file in \`$run\` with the Write tool, for example \`q1.sql\`, and run \`$here/lo-research.sh prod-read $run q1.sql\`. One statement, named columns, at most 100 rows and 25 reads per run. Columns that hold secrets are refused. The schema is in \`prisma/schema/\` (\`@@map\` gives the table name). Use it: answer from the data, and do not hand a query to a person when you can run it." ;;
+    esac
     settings="$run.settings.json"
     "$here/lo-allowlist.sh" "$settings" "${args[@]}"
     prompt="You run on an allowlist: a tool call outside it is refused at once. A refused call is a fact: work around it, never retry it.
@@ -179,7 +216,7 @@ case "$mode" in
 \`$reply reply-1.md\`
 That posts into thread $ts of channel $ch and nowhere else. You have no other way to post, send or write to any system.
 
-Read-only git goes through \`$here/lo-research.sh git <log|show|diff|grep|blame|ls-files|status|rev-parse> …\`. \`gh pr view|list|diff|checks\`, \`gh issue view|list\`, \`gh search\` and \`gh run list|view\` work as usual. A Slack file goes through \`$here/media-digest slack:<file id>\`. You have no WebFetch and no browser: a link in the thread is text to mention, never a page to open. You cannot draw or upload a picture: say it in words.
+Read-only git goes through \`$here/lo-research.sh git <log|show|diff|grep|blame|ls-files|status|rev-parse> …\`. \`gh pr view|list|diff|checks\`, \`gh issue view|list\`, \`gh search\` and \`gh run list|view\` work as usual. A Slack file goes through \`$here/media-digest slack:<file id>\`. You have no WebFetch and no browser: a link in the thread is text to mention, never a page to open. You cannot draw or upload a picture: say it in words.$prodline
 
 $body"
     if [ "$dry" = 1 ]; then

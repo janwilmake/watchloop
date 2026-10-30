@@ -1090,6 +1090,7 @@ slot as `cca` does: record it in `SLACK_CACHE`. `lo-research.sh rules [--data]
 | the repo copy and `/tmp`: Read, Grep, Glob, read-only `git` and `gh`, and a plain read-only command such as `ls` or `cat`, which Claude Code allows inside the Read paths by itself | yes | yes | yes |
 | Linear, Slack and Hyre staging: the read tools | yes | yes | yes |
 | Hyre production and Axiom: the read tools | no | yes | yes |
+| The production database: `lo-research.sh prod-read`, one guarded SELECT in a read-only transaction | no | yes | yes |
 | Intercom: the read tools | no | no | yes |
 | a post: `lo-research.sh reply` into the one thread it answers | yes | yes | yes |
 | WebFetch, WebSearch, a browser, `curl`; any other send or write; `.env` and credential files | no | no | no |
