@@ -1029,13 +1029,38 @@ status moved, put the ticket back to `READY_STATUS`.
 
 ### Step 4 — spawn
 
-One `cca` call per piece of work, from `REPO`, unsandboxed, all in a single Bash
-invocation:
+Write the prompt to a file in the session's scratch space (under
+`/tmp/claude-<uid>/`), then start the agent with **`lo-spawn.sh`**, one call per
+piece of work, unsandboxed, as the whole Bash command (no `cd`, no `&&`, no env
+prefix):
 
 ```bash
-sid=$(uuidgen | tr A-Z a-z)
-~/.claude/skills/watchloop/lo-usage.sh tag "$sid" <TICKET> --kind <new|2a|2b|2c|2e> [--pr <PR#>]
-cca "<the full prompt>" --dangerously-skip-permissions \
+~/.claude/skills/watchloop/lo-spawn.sh <PR#|TICKET|label> <kind> <prompt-file>
+```
+
+`kind` is one of `new`, `review`, `adopt-review`, `fix`, `rework`, `merge`,
+`restack`, `runbook`, `followups`. The script is the only route to a coding
+agent, so it fixes what no single call may loosen: it appends the standing rules
+(no production write, no merge or push to the base branch, drafts only, no
+`.env`, plus a project's own lines from a git-ignored `spawn-guard.md` beside
+the script), refuses a prompt that lives outside the scratch space, still holds
+a template placeholder, or never names its own PR or ticket, tags the session
+in the usage ledger, starts `cca` with the flags below from `LO_REPO`, and
+writes the dispatch marker for a PR. Never call `cca` directly for a coding
+agent.
+
+**In auto mode, allow the script once.** Claude Code's auto-mode classifier
+refuses a skipped-permissions spawn that the user did not ask for in the chat
+("Create Unsafe Agents"), and the loop's spawns are exactly that. One allow rule
+in `~/.claude/settings.json` lets the guarded script through without allowing
+`cca` in general: `"permissions": {"allow": ["Bash(<home>/.claude/skills/watchloop/lo-spawn.sh *)"]}`.
+A person adds it; the orchestrator never edits its own permissions. A session
+started with `--dangerously-skip-permissions` needs no rule.
+
+The flags `lo-spawn.sh` passes:
+
+```bash
+cca "<prompt + standing rules>" --dangerously-skip-permissions \
   --disallowedTools="$(~/.claude/skills/watchloop/lo-research.sh deny)" \
   --non-interactive --model opus --session-id "$sid"
 ```
@@ -1051,15 +1076,13 @@ an existing PR passes the ticket from its branch. A research agent (2s, 2t, 2i) 
 tagged by `lo-research.sh` itself, with `-` as the ticket, so its cost shows as
 "watchloop (slack research)". A failed tag never blocks the spawn.
 
-**Work aimed at an existing PR needs a dispatch marker, written in the same Bash
-call** (2a, 2b, 2c — a fresh ticket has no PR yet):
-
-```bash
-echo "<slot>" > ~/.claude/watchloop/dispatched/<PR#>
-```
-
-`cca` prints the slot it took (`agent-1 -> …`). The gate holds the PR while that
-slot's lock lives, then deletes the marker itself — no cleanup.
+**Work aimed at an existing PR gets a dispatch marker**, which `lo-spawn.sh`
+writes for a numeric target (2a, 2b, 2c — a fresh ticket has no PR yet, and a
+marker named after a ticket id breaks the gate): `~/.claude/watchloop/dispatched/<PR#>`
+holds the slot `cca` took. The gate holds the PR while that slot's lock lives,
+then deletes the marker itself — no cleanup. A marker outlives its agent's work
+when the slot is reused, so before typing into a running agent's screen, check
+its clone's branch (`git -C ~/.claude/agents/agent-N branch --show-current`).
 
 **An allowlist instead of skipped permissions.** `cca --allowlist <settings.json>`
 runs an agent with only the tools the file allows, in `dontAsk` mode: a call

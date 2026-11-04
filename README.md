@@ -89,7 +89,14 @@ constraints are real:
   send to a customer. That is the point, and it is also the risk — give the
   loop a repo where the worst an agent can do is open a bad PR. A research
   agent, which reads Slack, Intercom and mail, and a scheduled job run on an
-  allowlist instead: `lo-research.sh` and `lo-schedule.sh` build it.
+  allowlist instead: `lo-research.sh` and `lo-schedule.sh` build it. Every
+  coding agent starts through `lo-spawn.sh`, which adds the standing rules and
+  refuses a malformed prompt. In Claude Code's auto mode, allow that one script
+  in `~/.claude/settings.json`
+  (`"permissions": {"allow": ["Bash(/home/<you>/.claude/skills/watchloop/lo-spawn.sh *)"]}`):
+  the classifier refuses skipped-permissions spawns the user did not ask for in
+  the chat. Put your project's own standing rules for agents in a git-ignored
+  `spawn-guard.md` beside the script.
 - **Your repo needs its own agent guide** (`CLAUDE.md`). The prompt handed to each
   agent is short *because* the guide supplies branching, local checks, the PR
   template, testing and security.
