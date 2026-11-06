@@ -252,7 +252,9 @@ slack_read() {
     # parent, so the channel key alone says that something moved, not where.
     # Give each such line a key of its own, "<channel>/<parent ts>", at no
     # extra read. "T" rows are those keys; "P" rows are recent top-level
-    # messages from people, for the auto-watch below.
+    # messages from people, for the auto-watch below. A bot's thread gets no
+    # key: an alert bot replies "repeated N times" under its own alerts, and
+    # the channel key still moves when a person replies there.
     # A DM keeps few messages, so its newest 30 already cover its threads: the
     # auto-watch, which costs a read per thread, is for channels only.
     watch=$newer; case "$ch" in D*) watch=0 ;; esac
@@ -271,7 +273,7 @@ slack_read() {
         if (!bot && newer > 0 && ts + 0 >= newer) print "P\t" ts
         next
       }
-      /^Thread: / && ts != "" { print "T\t" ts "\t" $0 }')
+      /^Thread: / && ts != "" && !bot { print "T\t" ts "\t" $0 }')
     while IFS=$'\t' read -r kind t line; do
       case "$kind" in
         T) SLACK_SIGS=$(printf '%s' "$SLACK_SIGS" | jq -c --arg k "$ch/$t" \
