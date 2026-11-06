@@ -495,6 +495,9 @@ if [ "$1" = "--slack-ack" ]; then
     shown=$(cat "$SLACK_SHOWN" 2>/dev/null); [ -n "$shown" ] || shown='[]'
     keys=$(jq -nc --argjson a "$shown" '$a + $ARGS.positional' --args "$@")
   fi
+  # This fresh read may have added or dropped auto-watch threads: they start
+  # from what they hold now, as on a probe, or each would wake the loop once.
+  keys=$(jq -nc --argjson a "$keys" --argjson b "$SLACK_NEWKEYS" '$a + $b')
   jq -nc --argjson s "$seen" --argjson n "$SLACK_SIGS" --argjson k "$keys" \
     '$s + ($n | with_entries(select(.key as $x | $k | index($x))))' > "$SLACK_SEEN"
   echo '[]' > "$SLACK_SHOWN"
