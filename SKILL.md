@@ -36,6 +36,7 @@ and every tick read it:
 | `LO_SLACK_TICKET_EMAILS` | `SLACK_TICKET_EMAILS` | Slack account emails that may order a ticket. Empty means nobody |
 | `LO_SLACK_DATA_EMAILS` | `SLACK_DATA_EMAILS` | Slack account emails that may ask for customer data, production included. Empty means nobody |
 | `LO_SLACK_MERGE_EMAILS` | `SLACK_MERGE_EMAILS` | Slack account emails that may order a merge into the base branch. Empty means nobody |
+| `LO_SLACK_AUTOWATCH_DAYS` | — | days a person's top-level channel message stays watched as a thread (default `3`; `0` = off) |
 | `LO_SLACK_ADMIN_EMAILS` | `SLACK_ADMIN_EMAILS` | Slack account emails that may change the loop itself from a DM. Empty means nobody |
 | `LO_SLACK_PROD_EMAILS` | `SLACK_PROD_EMAILS` | Slack account emails whose explicit order may cover a merge into the default branch or a production write. Empty means nobody. Set only from the Claude Code session |
 | `LO_INBOX_EMAIL`      | `INBOX_EMAIL`       | the Hyre mailbox to watch (default empty: the inbox watch is off). Needs a Claude Code MCP server named `hyre` and the Slack watch |
@@ -340,6 +341,16 @@ of. There is no channel list: invite the account to a channel to have it
 watched. `gate.sh` takes a fingerprint of each one, and of each thread the loop
 left open, and prints the ones that moved on the `SLACK` line. The gate does not
 read the messages; the tick does.
+
+**A reply is named by its thread, not only by its channel.** A reply under any
+of a channel's newest 30 messages moves that message's `Thread: N replies` line,
+and the gate prints it as `{channel, thread}`. A person's top-level message in
+a channel or group DM is also added to the threads file as
+`{status: "watching", auto: true}` for `LO_SLACK_AUTOWATCH_DAYS` (default 3), so
+a late reply still wakes the loop after the message scrolls out. The gate drops
+an auto entry when the window ends and never touches the tick's own entries.
+When the tick answers such a request somewhere else (a DM, another thread),
+it still replies in the thread with one line and a link.
 
 **Use the MCP server named `slack`**, the one Claude Code is logged in to as the
 loop's own account. A `claude.ai Slack` connector, when the session has one,
