@@ -93,7 +93,7 @@ SLOT_SCAN="${LO_SLOT_SCAN:-$(awk -v r="$(( $(ram_bytes) / 1073741824 ))" \
   -v a="${LO_RAM_PER_AGENT:-2.5}" 'BEGIN{m=int(r/a); print (m<8?8:m)}')}"
 WAIT_INTERVAL="${LO_WAIT_INTERVAL:-60}"   # --wait: seconds between probes
 WAIT_MAX="${LO_WAIT_MAX:-2400}"           # --wait: give up and let the model re-arm
-GATE_ERR_WAKE="${LO_GATE_ERR_WAKE:-3}"    # --wait: consecutive forge errors before waking
+GATE_ERR_WAKE="${LO_GATE_ERR_WAKE:-3}"    # failed board reads in a row before FORGE-DOWN
 # Comments written before the loop started marking its own carry no marker, so
 # they would all read as human. This floor is the day marking began: nothing
 # before it is ever treated as feedback.
@@ -524,6 +524,131 @@ if [ "$1" = "--inbox-ack" ]; then
   echo "inbox: acknowledged $keys${INBOX_ERR:+; $INBOX_ERR}"
   exit 0
 fi
+# --- The board: every open PR, read in pages ---
+# One call for the whole board timed out for good once the repo held ~200 open
+# PRs: GitHub ends a GraphQL query at ~10s, and 100 PRs with their bodies and
+# every check context took longer (19 Nov 2026: a 504 on every probe for two
+# hours, at N=100 and N=200, while N=50 answered in 7s). So the board comes in
+# pages of PR_PAGE with only the rollup state of each PR, and the check contexts
+# come from a second query, for the few PRs whose `ci` verdict the gate reads.
+# The board is read newest first, so a limit that binds drops the OLDEST open
+# PRs, and an invisible PR is absent from REGATE, DRAFTS and RESTACK alike —
+# which reads exactly like a clean board. GATE-WARN says when it binds.
+PR_LIMIT="${LO_PR_LIMIT:-400}"
+PR_PAGE="${LO_PR_PAGE:-50}"
+# The last good board, for a probe that cannot read the forge (seconds).
+PR_CACHE_MAX="${LO_PR_CACHE_MAX:-7200}"
+BOARD_CACHE=~/.claude/watchloop/gate-board-cache.json
+# "<failed probes in a row> <epoch of the first> <epoch of the last FORGE-DOWN>"
+FORGE_STATE=~/.claude/watchloop/gate-forge-state
+BOARD_Q='query($owner:String!,$name:String!,$first:Int!,$after:String){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:$first,after:$after,orderBy:{field:CREATED_AT,direction:DESC}){pageInfo{hasNextPage endCursor} nodes{number isDraft mergeable body headRefName baseRefName createdAt author{login __typename} labels(first:100){nodes{name}} commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}'
+CTX_Q='query($owner:String!,$name:String!,$num:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$num){number commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{... on CheckRun{name conclusion}}}}}}}}}}'
+
+# gh_retry <gh args...>: one gh call, up to three attempts; the reply is in
+# GH_OUT and GH_OK is the jq test that makes it a good one, because `gh` exits 0
+# on some of the failures. Keep stderr: a discarded one makes every GATE-ERROR
+# undiagnosable. Three attempts over ~25s, because the failure arrives in
+# clusters rather than singly: api.github.com resolves to a NAT64 address as
+# well as an IPv4 one, and while that path is down every call inside the same
+# few seconds times out together. One retry at 5s sat inside one cluster and
+# woke the loop a minute after arming.
+gh_retry() {
+  local d
+  for d in 0 5 20; do
+    [ "$d" -gt 0 ] && sleep "$d"
+    GH_OUT=$(gh "$@" 2>&1)
+    printf '%s' "$GH_OUT" | jq -e "$GH_OK" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+# fetch_board: fill BOARD with the open PRs in the shape of
+# `gh pr list --json number,isDraft,mergeable,body,labels,statusCheckRollup,headRefName,baseRefName,author,createdAt`,
+# plus `ciDetail`: true when statusCheckRollup holds the PR's check runs, false
+# when it was not asked for. Returns 1 with the reply in BOARD_ERR on failure.
+fetch_board() {
+  local owner=${slug%%/*} name=${slug##*/} count=0 first page n after next dir
+  local -a cur
+  BOARD=""; BOARD_ERR=""
+  dir=$(mktemp -d) || { BOARD_ERR="mktemp failed"; return 1; }
+  : > "$dir/board"; : > "$dir/ctx"
+  cur=(-F after=null)
+  while [ "$count" -lt "$PR_LIMIT" ]; do
+    first=$PR_PAGE; [ $(( PR_LIMIT - count )) -lt "$first" ] && first=$(( PR_LIMIT - count ))
+    GH_OK='.data.repository.pullRequests.nodes | type == "array"'
+    if ! gh_retry api graphql -f owner="$owner" -f name="$name" -F first="$first" "${cur[@]}" -f query="$BOARD_Q"; then
+      BOARD_ERR="$GH_OUT"; rm -rf "$dir"; return 1
+    fi
+    page=$(printf '%s' "$GH_OUT" | jq -c '.data.repository.pullRequests')
+    # gh names a bot author "app/<login>"; keep that, the adopt list compares it.
+    printf '%s' "$page" | jq -c '.nodes[] | {number, isDraft, mergeable, body, headRefName, baseRefName, createdAt,
+        author: (if .author == null then null
+                 else {login: ((if .author.__typename == "Bot" then "app/" else "" end) + .author.login)} end),
+        labels: [ .labels.nodes[]? | {name} ],
+        rollupState: (.commits.nodes[0].commit.statusCheckRollup.state // null)}' >> "$dir/board"
+    count=$(( count + $(printf '%s' "$page" | jq '.nodes | length') ))
+    [ "$(printf '%s' "$page" | jq -r '.pageInfo.hasNextPage')" = true ] || break
+    cur=(-f after="$(printf '%s' "$page" | jq -r '.pageInfo.endCursor')")
+  done
+  # The PRs whose `ci` something reads: the loop's own (REGATE, the drafts
+  # fingerprint) and the adopt candidates, both only off the base `main`, as in
+  # `verdicts` below. A PR with no rollup has no checks at all, which needs no
+  # second call: its verdict is "not-run" with an empty list.
+  for n in $(jq -r --arg m "$PR_MARKER" --arg who "$ADOPT_AUTHORS" '
+      ($who | ascii_downcase | split(",") | map(gsub("^ +| +$";"")) | map(select(length>0))) as $w
+      | select(.baseRefName != "main" and .rollupState != null)
+      | select(((.body // "") | contains($m))
+               or (((.author.login // "") | ascii_downcase) as $a | $w | index($a) != null))
+      | .number' "$dir/board"); do
+    after=null; next=true
+    while [ "$next" = true ]; do
+      GH_OK='.data.repository.pullRequest.number | type == "number"'
+      if [ "$after" = null ]; then cur=(-F after=null); else cur=(-f after="$after"); fi
+      if ! gh_retry api graphql -f owner="$owner" -f name="$name" -F num="$n" "${cur[@]}" -f query="$CTX_Q"; then
+        BOARD_ERR="$GH_OUT"; rm -rf "$dir"; return 1
+      fi
+      page=$(printf '%s' "$GH_OUT" | jq -c '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts // {nodes: [], pageInfo: {hasNextPage: false}}')
+      printf '%s' "$page" | jq -c --argjson n "$n" '{n: $n, ctx: [ .nodes[] | select(.name != null) ]}' >> "$dir/ctx"
+      next=$(printf '%s' "$page" | jq -r '.pageInfo.hasNextPage')
+      after=$(printf '%s' "$page" | jq -r '.pageInfo.endCursor // "null"')
+    done
+  done
+  BOARD=$(jq -s -c --arg m "$PR_MARKER" --arg who "$ADOPT_AUTHORS" --slurpfile ctx "$dir/ctx" '
+      ($who | ascii_downcase | split(",") | map(gsub("^ +| +$";"")) | map(select(length>0))) as $w
+      | (reduce $ctx[] as $c ({}; .[$c.n | tostring] += $c.ctx)) as $runs
+      | map(. + (if .baseRefName != "main"
+                    and (((.body // "") | contains($m))
+                         or (((.author.login // "") | ascii_downcase) as $a | $w | index($a) != null))
+                 then {ciDetail: true, statusCheckRollup: ($runs[.number | tostring] // [])}
+                 else {ciDetail: false, statusCheckRollup: null} end))' "$dir/board")
+  rm -rf "$dir"
+  printf '%s' "$BOARD" | jq -e 'type == "array"' >/dev/null 2>&1 || { BOARD_ERR="board merge failed"; return 1; }
+}
+
+# forge_down / forge_up: count failed probes in a row across probes, waiters and
+# ticks. One failure is a blip and stays quiet in --wait; GATE_ERR_WAKE in a row
+# is an outage, said once with FORGE-DOWN and again once an hour while it lasts,
+# and FORGE-UP says once that it ended. A --peek reads the count, never writes it.
+FORGE_LINE=""
+forge_down() {
+  local now f=0 s=0 a=0
+  now=$(date +%s)
+  [ -f "$FORGE_STATE" ] && read -r f s a < "$FORGE_STATE"
+  f=$(( ${f:-0} + 1 )); [ "${s:-0}" -gt 0 ] 2>/dev/null || s=$now
+  if [ "$f" -ge "$GATE_ERR_WAKE" ] && [ $(( now - ${a:-0} )) -ge 3600 ]; then
+    FORGE_LINE="FORGE-DOWN $(( (now - s) / 60 ))m: $(printf '%s' "$BOARD_ERR" | tr '\n' ' ' | cut -c1-200)"
+    a=$now
+  fi
+  [ "$PEEK" = 1 ] || printf '%s %s %s\n' "$f" "$s" "${a:-0}" > "$FORGE_STATE"
+}
+forge_up() {
+  local f=0 s=0 a=0
+  [ -f "$FORGE_STATE" ] || return 0
+  read -r f s a < "$FORGE_STATE"
+  [ "${a:-0}" -gt 0 ] 2>/dev/null && FORGE_LINE="FORGE-UP after $(( ($(date +%s) - ${s:-0}) / 60 ))m"
+  [ "$PEEK" = 1 ] || rm -f "$FORGE_STATE"
+}
+
 NOREASON=""
 
 # probe: measure the world once. Prints the context block and returns 0 when
@@ -533,6 +658,7 @@ probe() {
   # Set when the forge could not be read at all. It is not work, and in --wait
   # the caller decides whether an outage has lasted long enough to wake for.
   GATE_ERR=""
+  FORGE_LINE=""
 
   # --- hourly base-branch refresh (refuses, never forces) ---
   stamp=~/.claude/watchloop/last-fetch
@@ -628,49 +754,48 @@ probe() {
   slug=$(git -C "$REPO" remote get-url origin 2>/dev/null \
          | sed -e 's#.*github.com[:/]##' -e 's#\.git$##')
 
-  # --- the world, in one gh call ---
+  # --- the world: every open PR (fetch_board) ---
   # NOT filtered by --base: a stacked layer's base is the layer below it, never
   # $BASE, so filtering here made every layer above the first invisible to the
   # gate — it would sit open and unreviewed until a human found it by hand.
   # `.mine` below is what keeps this to the loop's own PRs, and `main` is
   # excluded so a release PR is never mistaken for work.
-  # `gh pr list` returns newest first, so a limit that binds silently drops the
-  # OLDEST open PRs, and an invisible PR is absent from REGATE, DRAFTS and
-  # RESTACK alike — which reads exactly like a clean board.
-  PR_LIMIT="${LO_PR_LIMIT:-400}"
-  # Keep stderr: a discarded one makes every GATE-ERROR undiagnosable, and this
-  # is the call that fails. It is ~5s of GraphQL over every open PR, and GitHub
-  # refuses it intermittently while the agents hammer the same API. `jq` decides
-  # whether the reply is a board, because `gh` exits 0 on some of these.
-  # Three attempts over ~25s, because the failure arrives in clusters rather
-  # than singly: api.github.com resolves to a NAT64 address as well as an IPv4
-  # one, and while that path is down every call inside the same few seconds
-  # times out together. One retry at 5s sat inside one cluster and woke the loop
-  # a minute after arming. A wake that costs a tick is worth more than 25s here.
-  pr_try=""
-  for pr_delay in 0 5 20; do
-    [ "$pr_delay" -gt 0 ] && sleep "$pr_delay"
-    pr_try=$(gh pr list --repo "$slug" --state open --limit "$PR_LIMIT" \
-      --json number,isDraft,mergeable,body,labels,statusCheckRollup,headRefName,baseRefName,author,createdAt 2>&1)
-    printf '%s' "$pr_try" | jq -e 'type == "array"' >/dev/null 2>&1 && break
-  done
-  # A broken gh is worth waking for, but only once it is more than a blip — the
-  # wait loop counts them. A single probe still says so and exits.
-  if ! printf '%s' "$pr_try" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    GATE_ERR="gh pr list failed — $(printf '%s' "$pr_try" | tr '\n' ' ' | cut -c1-200)"
+  STALE_M=""; NOBOARD=""
+  if fetch_board; then
+    prs="$BOARD"
+    if [ "$PEEK" != 1 ]; then
+      jq -nc --argjson at "$(date +%s)" --slurpfile b <(printf '%s' "$prs") \
+        '{at: $at, board: $b[0]}' > "$BOARD_CACHE.tmp" && mv "$BOARD_CACHE.tmp" "$BOARD_CACHE"
+    fi
+    forge_up
+  else
+    GATE_ERR="PR board read failed — $(printf '%s' "$BOARD_ERR" | tr '\n' ' ' | cut -c1-200)"
     [ "$MODE" != "wait" ] && echo "GATE-ERROR: $GATE_ERR"
-    # The forge being down does not stop mail and the calendar.
-    [ "$MODE" != "wait" ] && sweep_due && sweep_line
-    return 0
+    forge_down
+    # Degraded, not stopped: the forge being down does not stop Linear, Slack,
+    # mail and the schedules. Work from the last good board while it is young
+    # enough to trust for dedup and for what the loop already has in hand, and
+    # from no board at all after that.
+    cache_at=$(jq -r '.at // 0' "$BOARD_CACHE" 2>/dev/null || echo 0)
+    cache_age=$(( $(date +%s) - ${cache_at:-0} ))
+    if [ "${cache_at:-0}" -gt 0 ] && [ "$cache_age" -lt "$PR_CACHE_MAX" ] \
+       && prs=$(jq -c '.board | select(type == "array")' "$BOARD_CACHE" 2>/dev/null) && [ -n "$prs" ]; then
+      STALE_M=$(( cache_age / 60 ))
+      notes="$notes${notes:+; }forge unreadable: PR lines are from the board of ${STALE_M}m ago"
+    else
+      prs='[]'; NOBOARD=1
+      notes="$notes${notes:+; }forge unreadable: no board younger than $(( PR_CACHE_MAX / 60 ))m, PR lines left out"
+    fi
   fi
-  prs="$pr_try"
 
   # And say so if it ever binds again, rather than truncating quietly.
   pr_count=$(printf '%s' "$prs" | jq 'length')
-  if [ "$pr_count" -ge "$PR_LIMIT" ]; then
+  if [ -z "$GATE_ERR" ] && [ "$pr_count" -ge "$PR_LIMIT" ]; then
     echo "GATE-WARN: open PRs hit the query limit ($pr_count >= $PR_LIMIT) — the oldest are invisible. Raise LO_PR_LIMIT."
   fi
 
+  # `ci` is null on a PR whose verdict nothing reads (ciDetail false, see
+  # fetch_board): no line and no decision below looks at it.
   verdicts=$(printf '%s' "$prs" | jq -c --arg m "$PR_MARKER" '[ .[] | {
       pr: .number, draft: .isDraft, merge: .mergeable, head: .headRefName,
       base: .baseRefName, author: ((.author.login // "") | ascii_downcase),
@@ -689,18 +814,23 @@ probe() {
       #   SKIPPED / NEUTRAL — never ran, or ran and declined to judge.
       # Both of the first two were found on 26 Aug, when a restack force-pushed
       # five promoted PRs and the gate reported them as failing CI.
-      ci: ( [ .statusCheckRollup[]? | select(.conclusion != null and .conclusion != ""
+      ci: ( if (.ciDetail | not) then null else
+            [ .statusCheckRollup[]? | select(.conclusion != null and .conclusion != ""
                 and .conclusion != "SKIPPED" and .conclusion != "NEUTRAL"
                 and .conclusion != "CANCELLED") ] as $c
             | if   ([ $c[] | select((.name // "") | startswith("Test (shard")) ] | length) == 0 then "not-run"
               elif ([ $c[] | select(.conclusion != "SUCCESS") ] | length) > 0 then "failing"
-              else "green" end ) } ] | map(select(.base != "main")) | sort_by(.pr)')
+              else "green" end end ) } ] | map(select(.base != "main")) | sort_by(.pr)')
 
+  # A stale board never re-drafts: the PR may have been fixed since, and a
+  # re-draft takes a promoted PR out of review.
+  if [ -n "$STALE_M" ]; then regate='[]'; else
   regate=$(printf '%s' "$verdicts" | jq -c --argjson held "$held" --argjson inhand "$inhand" '[ .[]
             | select(.draft==false and .mine)
             | select(.merge=="CONFLICTING" or .ci=="failing")
             | .pr as $p | select($inhand | index($p) | not)
             | .head as $h | select($held | index($h) | not) ]')
+  fi
   # invalid is deliberately NOT filtered by $held: the label is the only durable
   # record that a reclaim is owed, and steps 2a.1-4 need no slot.
   invalid=$(printf '%s' "$verdicts" | jq -c '[ .[] | select(.invalid and .mine) | .pr ]')
@@ -1037,6 +1167,16 @@ probe() {
     fi
   fi
 
+  # The tick dedups the candidates against the open PRs with its own forge
+  # calls, and those fail with the forge. So on a stale board the gate does it:
+  # a ticket whose id is in the head branch of a PR on that board is left out.
+  if [ -n "$GATE_ERR" ] && [ -z "$NOBOARD" ] && [ -n "$todo_ids" ]; then
+    todo_ids=$(printf '%s' "$prs" | jq -r --arg ids "$todo_ids" '
+      [ .[].headRefName | ascii_downcase ] as $h
+      | $ids | split(",") | map(select(ascii_downcase as $t
+          | $h | any(test("(^|/)" + $t + "(-|$)")) | not)) | join(",")')
+  fi
+
   # queue staleness only matters when there is somewhere to put an agent
   queue_stale=no
   if [ "$slots" -gt 0 ]; then
@@ -1081,9 +1221,17 @@ probe() {
   prevregate=$(cat "$RSTATE" 2>/dev/null)
   adoptsig=$(printf '%s' "$adopt" | jq -Sc '[ .[] | {pr,merge,ci,needs} ]' 2>/dev/null | hash16)
   prevadopt=$(cat "$ASTATE" 2>/dev/null)
+  # A board the probe could not read moves none of the three fingerprints, or
+  # the first good board after the outage re-wakes on entries already seen.
+  if [ -n "$GATE_ERR" ]; then
+    regatesig="$prevregate"
+    [ -n "$NOBOARD" ] && { draftsig="$prevdrafts"; adoptsig="$prevadopt"; }
+  fi
 
   # --- decide ---
   work=no
+  # An outage that outlasted GATE_ERR_WAKE probes, and its end, are news.
+  [ -n "$FORGE_LINE" ] && work=yes
   # Still acted on at slots 0 — a de-gate needs no agent — but only once per
   # change. See RSTATE above for why the unconditional form spun.
   [ "$n_regate"  -gt 0 ] && [ "$regatesig" != "$prevregate" ] && work=yes
@@ -1196,6 +1344,10 @@ probe() {
   echo "load1=$load freegb=$freegb diskgb=$diskgb busy=$busy slots=$slots max=$max_agents$capnote"
   [ -n "$notes" ]           && echo "notes: $notes"
   [ "$hash" != "$prev" ]    && echo "world-changed: yes"
+  [ "$MODE" = wait ] && [ -n "$GATE_ERR" ] && echo "GATE-ERROR: $GATE_ERR"
+  [ -n "$FORGE_LINE" ]      && echo "$FORGE_LINE"
+  # Every line read off a cached board says how old that board is.
+  sm="${STALE_M:+ (stale ${STALE_M}m)}"
   [ "$n_regate"  -gt 0 ]    && echo "REGATE: $regate"
   [ "$n_feedback" -gt 0 ]   && echo "FEEDBACK: $feedback"
   [ "$n_slack" -gt 0 ]      && echo "SLACK: $slack"
@@ -1204,13 +1356,17 @@ probe() {
   fi
   [ "$n_inbox" -gt 0 ]      && echo "INBOX: $inbox"
   [ "$n_inbox" -gt 0 ] && [ "$PEEK" != 1 ] && printf '%s' "$inbox" > "$INBOX_SHOWN"
-  [ "$n_invalid" -gt 0 ]    && echo "INVALID: $invalid"
-  [ "$n_drafts"  -gt 0 ]    && echo "DRAFTS: $drafts"
-  [ "$n_stack"   -gt 0 ]    && echo "STACK: $stack"
-  [ "$n_restack" -gt 0 ]    && echo "RESTACK: $restack"
-  [ "$n_adopt"   -gt 0 ]    && echo "ADOPT: $adopt"
+  [ "$n_invalid" -gt 0 ]    && echo "INVALID: $invalid$sm"
+  [ "$n_drafts"  -gt 0 ]    && echo "DRAFTS: $drafts$sm"
+  [ "$n_stack"   -gt 0 ]    && echo "STACK: $stack$sm"
+  [ "$n_restack" -gt 0 ]    && echo "RESTACK: $restack$sm"
+  [ "$n_adopt"   -gt 0 ]    && echo "ADOPT: $adopt$sm"
   [ "$n_sched"   -gt 0 ]    && echo "SCHEDULES-DUE: $sched"
-  [ "$slots" -gt 0 ] && [ -n "$todo_ids" ] && echo "TODO-CANDIDATES: $todo_ids (from ${todo_source:-Todo})"
+  [ "$slots" -gt 0 ] && [ -n "$todo_ids" ] && {
+    tnote=""
+    [ -n "$STALE_M" ] && tnote=" (stale ${STALE_M}m: deduped against the cached board)"
+    [ -n "$NOBOARD" ] && tnote=" (no board: not deduped against open PRs)"
+    echo "TODO-CANDIDATES: $todo_ids (from ${todo_source:-Todo})$tnote"; }
   [ "$queue_stale" = yes ]  && echo "queue: stale, rebuild before 2d"
   sweep_due && sweep_line
   return 0
@@ -1237,26 +1393,21 @@ started=$(date +%s)
 echo "waiting for work - probe every ${WAIT_INTERVAL}s, give up after $(dur $WAIT_MAX)"
 lastkey=""; lastprint=0; gate_errs=0
 while :; do
+  # A forge that cannot be read is not work on its own: `probe` has already
+  # tried three times, and a hand-run `gh` a minute later usually succeeds. So
+  # an unreadable board does not stop the probe — it runs on the cached board —
+  # and wakes only through what else it found, or through the FORGE-DOWN line
+  # that forge_down writes once GATE_ERR_WAKE probes in a row failed.
   if probe; then
-    if [ -z "$GATE_ERR" ]; then
-      echo "--- woke after $(dur $(( $(date +%s) - started ))) ---"
-      exit 0
-    fi
-    # A forge that cannot be read is not work. Waking on one costs a tick and
-    # hands the model nothing to act on: `probe` has already tried three times,
-    # and a hand-run `gh` a minute later succeeds every time. api.github.com
-    # resolves to a NAT64 address as well as an IPv4 one, and outages on that
-    # path outlast any retry window worth putting inside a probe. So count them
-    # instead: GATE_ERR_WAKE probes in a row is an outage a person should see.
-    gate_errs=$(( gate_errs + 1 ))
-    [ "$gate_errs" -eq 1 ] && echo "$(date -u +%H:%MZ) forge unreadable, still waiting - $GATE_ERR"
-    if [ "$gate_errs" -ge "$GATE_ERR_WAKE" ]; then
-      echo "GATE-ERROR: $GATE_ERR"
-      echo "--- woke after $(dur $(( $(date +%s) - started ))) ---"
-      exit 0
-    fi
+    echo "--- woke after $(dur $(( $(date +%s) - started ))) ---"
+    exit 0
   else
-    gate_errs=0
+    if [ -n "$GATE_ERR" ]; then
+      gate_errs=$(( gate_errs + 1 ))
+      [ "$gate_errs" -eq 1 ] && echo "$(date -u +%H:%MZ) forge unreadable, still waiting - $GATE_ERR"
+    else
+      gate_errs=0
+    fi
     key=$(printf '%s' "$NOREASON" | tr -d '0-9.')
     if [ "$key" != "$lastkey" ] || [ $(( $(date +%s) - lastprint )) -ge 600 ]; then
       echo "$(date -u +%H:%MZ) NO - $NOREASON"

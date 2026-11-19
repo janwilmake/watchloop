@@ -30,6 +30,10 @@ and every tick read it:
 | `LO_RAM_PER_AGENT`    | `RAM_PER_AGENT_GB`  | GB per agent (default `2.5`; raise it for a stack running Docker or a local DB) |
 | `LO_MAX_AGENTS`       | `MAX_AGENTS_CAP`    | ceiling on concurrent agents; `0` = unlimited (default `0`) |
 | `LO_SLOT_SCAN`        | `SLOT_SCAN`         | agent slots to probe for liveness (default: what RAM allows, floor 8) |
+| `LO_PR_LIMIT`         | `PR_LIMIT`          | most open PRs the gate reads (default `400`); `GATE-WARN` when it binds |
+| `LO_PR_PAGE`          | `PR_PAGE`           | open PRs per board query (default `50`). GitHub ends a GraphQL query at ~10s; lower it when `GATE-ERROR` shows a 502/504 |
+| `LO_PR_CACHE_MAX`     | `PR_CACHE_MAX`      | seconds the last good board stays usable while the forge cannot be read (default `7200`) |
+| `LO_GATE_ERR_WAKE`    | `GATE_ERR_WAKE`     | failed board reads in a row before `FORGE-DOWN` (default `3`) |
 | `LO_FEEDBACK_SINCE`   | `FEEDBACK_SINCE`    | nothing older is read as feedback          |
 | `LO_FEEDBACK_LOGINS`  | `FEEDBACK_LOGINS`   | GitHub logins whose comments steer the loop; empty means every non-bot login |
 | `LO_SLACK`            | `SLACK_ON`          | `1` to watch Slack (default `0`). Needs a Claude Code MCP server named `slack` |
@@ -171,8 +175,11 @@ prints either a `NO` line or:
 
 ```
 load1=… freegb=… diskgb=… busy=… slots=N
-notes: …                 # a reap, a refused fetch, a Linear hiccup
+notes: …                 # a reap, a refused fetch, a Linear hiccup, a stale board
 world-changed: yes
+GATE-ERROR: …            # the PR board could not be read; the probe ran on anyway
+FORGE-DOWN 12m: …        # LO_GATE_ERR_WAKE failed reads in a row; again once an hour
+FORGE-UP after 40m       # the first good read after a FORGE-DOWN, once
 REGATE: [ … ]            # promoted PRs that stopped being mergeable / went red
 FEEDBACK: [ … ]          # unanswered comments on the loop's PRs
 SLACK: [ … ]             # Slack channels and open threads that moved since the last ack
@@ -187,6 +194,13 @@ SCHEDULES-DUE: [ … ]     # scheduled jobs whose run time has come, each {name,
 SWEEP-DUE: last sweep 63m ago - …   # LO_SWEEP=1 and the hour is up (2m)
 ```
 
+When the board cannot be read, the probe uses the last good one while it is
+younger than `LO_PR_CACHE_MAX`. Each line taken from it (`INVALID`, `DRAFTS`,
+`STACK`, `RESTACK`, `ADOPT`) ends in `(stale Nm)`, `REGATE` is left out, and
+`TODO-CANDIDATES` is deduped against that board. With no usable board the PR
+lines are left out. Linear, Slack, the inbox, `SCHEDULES-DUE` and `SWEEP-DUE`
+run as usual.
+
 - **On a `NO` line, end the tick** and report the reason the gate gave, unless a
   `SWEEP-DUE` line follows it: then do 2m first.
 - **`--- sweep due after 40m ---`** with a `SWEEP-DUE` line — nothing else woke
@@ -199,6 +213,12 @@ SWEEP-DUE: last sweep 63m ago - …   # LO_SWEEP=1 and the hour is up (2m)
 - **`--- still nothing after 40m, re-arm ---`** — arm the next waiter, end the tick.
 - **A tick that only wants to look uses `--peek`** — same probe, never writes the
   state file. A plain run while a waiter is alive swallows that waiter's next wake.
+- **On `FORGE-DOWN`, work from Linear and Slack.** GitHub cannot be read, so
+  start the `TODO-CANDIDATES` (deduped against the cached board) and answer
+  Slack, but promote, re-draft and merge nothing on a `(stale Nm)` line. Run
+  `gh api rate_limit` once: a spent quota is a different fix from an outage.
+  Tell the user once per outage, with the error, then arm the next waiter.
+  `FORGE-UP` ends it: say so once.
 - `TODO-CANDIDATES` is pre-filtered on assignee and not-archived only. Still apply
   the 2d drop rules and dedup against open PRs.
 - `agent-codemode` must be on `PATH` or at `~/.local/node/bin/agent-codemode`, or
