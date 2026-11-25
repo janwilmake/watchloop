@@ -416,14 +416,20 @@ messages without `oldest`**. A new message is one of two things:
   `channels` value, and take the replies newer than that value. A read with
   `oldest` hides the parent, so it never finds these.
 
-**Put 👀 on every message the loop acts on**, as soon as the tick decides to act
-and before the work starts: a research agent, a ticket order, a merge order, a
-draft, a change to the loop or to `.env`. Call `slack_add_reaction` on the
-`slack` server with `channel_id`, `message_ts` (the message's own `ts`, a reply
-included) and `emoji: "eyes"`. The person then sees the loop picked it up; the
-answer can take a while. A message the loop stays out of gets no reaction. A
-failed reaction never stops the work. (The user of the Claude Code session asked
-for this on 15 Oct 2026.)
+**Put 👀 on every request the moment the tick sees it.** A request is any
+message from a person that asks the loop for something: a question, research,
+data, a file, a ticket order, a merge order, a draft, a change to the loop or to
+`.env`. The reaction is the tick's first action on that message: before it reads
+the rest of the thread, before it starts an agent, and before it answers, even
+when the answer is one line. Call `slack_add_reaction` on the `slack` server with
+`channel_id`, `message_ts` (the message's own `ts`, a reply included) and
+`emoji: "eyes"`. When one person sends a request in several short messages, put
+👀 on the last one. The person then sees at once that the loop picked it up; the
+answer can take a while. A message the loop stays out of, or one that asks for
+nothing ("thanks", "ok"), gets no reaction. A failed reaction never stops the
+work. In an externally shared channel the loop cannot react: the answer in the
+asker's DM is the acknowledgement. (The user of the Claude Code session asked for
+this on 15 Oct and again on 25 Nov 2026, after people found the loop slow.)
 
 After the channel is handled, set its `channels` value to the newest `ts` seen,
 top-level or reply. Then, per message that is new:
