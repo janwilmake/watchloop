@@ -188,6 +188,13 @@ SLACK_ON="${LO_SLACK:-0}"
 SLACK_CHANLIST=~/.claude/watchloop/gate-slack-channels   # membership, refreshed hourly
 SLACK_SERVER="${LO_SLACK_SERVER:-slack}"      # MCP server name in Claude Code
 SLACK_INTERVAL="${LO_SLACK_INTERVAL:-300}"    # seconds between real reads; --wait probes every 60s
+# Between full reads, one search call names the channels and threads with a
+# new message, and only those are read again. A full read costs one call per
+# channel and per open thread (hundreds), so it runs this often as a safety net
+# for a message the search index missed.
+SLACK_FULL_EVERY="${LO_SLACK_FULL_EVERY:-1800}"
+SLACK_PROBE=~/.claude/watchloop/gate-slack-probe.json   # the message ts the last search returned
+SLACK_PROBE_LIMIT=20
 SLACK_THREADS=~/.claude/watchloop/${PREFIX}-slack.json   # the tick's own record of threads
 SLACK_SEEN=~/.claude/watchloop/gate-slack-seen.json      # key -> fingerprint the tick acknowledged
 # A person's top-level message is watched as a thread for this many days, so a
@@ -210,6 +217,153 @@ SLACK_ERR=""
 SLACK_SIGS='{}'
 SLACK_NEWKEYS='[]'   # thread keys the auto-watch added or dropped on this read
 
+# slack_read_channel <channel> <auto-watch cut-off>: put the channel's key, and
+# a key per thread line in its newest 30 messages, into SLACK_SIGS. Recent
+# top-level messages of people go to SLACK_AUTO when the cut-off is above 0.
+slack_read_channel() {
+  local ch=$1 watch=$2 out rows kind t line quiet
+  out=$("$AC" call "$SLACK_SERVER" slack_read_channel \
+    --json "{\"channel_id\":\"$ch\",\"limit\":30}" --text 2>/dev/null </dev/null)
+  # An answer without messages is an error text, such as a rate limit. It must
+  # not count as a change, or every refused read would wake the loop.
+  if ! printf '%s' "$out" | grep -q '"messages"'; then
+    SLACK_ERR="slack read failed (claude mcp login $SLACK_SERVER?)"
+    return 0
+  fi
+  # A reply changes only the "Thread: N replies (latest: …)" line of its
+  # parent, so the channel key alone says that something moved, not where.
+  # Give each such line a key of its own, "<channel>/<parent ts>", at no
+  # extra read. "T" rows are those keys; "P" rows are recent top-level
+  # messages from people, for the auto-watch below. A bot's thread gets no
+  # key: an alert bot replies "repeated N times" under its own alerts, and
+  # the channel key still moves when a person replies there.
+  # A DM keeps few messages, so its newest 30 already cover its threads: the
+  # auto-watch, which costs a read per thread, is for channels only.
+  case "$ch" in D*) watch=0 ;; esac
+  rows=$(printf '%s' "$out" | jq -r '.messages // empty' 2>/dev/null | awk -v newer="$watch" '
+    /^=== Message from / {
+      ts = ""; bot = 0
+      if (match($0, /(<[^<>]*> )?\([A-Z0-9]+\) at [^()<>]*===[ ]*$/)) {
+        tail = substr($0, RSTART, RLENGTH)
+        id = tail; sub(/^.*\(/, "", id); sub(/\).*$/, "", id)
+        bot = (id ~ /^B/ || id == "USLACKBOT" || tail ~ /^<[^<>]*@slack-bots\.com> /)
+      }
+      next
+    }
+    /^Message TS: [0-9]+\.[0-9]+/ {
+      ts = $3
+      if (!bot && newer > 0 && ts + 0 >= newer) print "P\t" ts
+      next
+    }
+    /^Thread: / && ts != "" && !bot { print "T\t" ts "\t" $0 }')
+  while IFS=$'\t' read -r kind t line; do
+    case "$kind" in
+      T) SLACK_SIGS=$(printf '%s' "$SLACK_SIGS" | jq -c --arg k "$ch/$t" \
+           --arg v "$(printf '%s' "$line" | hash16)" '.[$k] = $v') ;;
+      P) SLACK_AUTO=$(printf '%s' "$SLACK_AUTO" | jq -c --arg c "$ch" --arg t "$t" '. + [{channel: $c, ts: $t}]') ;;
+    esac
+  done <<< "$rows"
+  # A message from a bot is not news: an alert channel would wake the loop on
+  # every alert, for the tick to skip it. Drop bot messages from the
+  # fingerprint, but keep their "Thread:" line, so a person who replies under
+  # an alert is still seen.
+  # The header is "=== Message from <display name> [<email>] (<id>) at <time> ===".
+  # Judge the author by the id and the email at the END of the line only: the
+  # display name is free text, and a person who puts "botuser-" or
+  # "slack-bots.com" in it must not drop out of the fingerprint. A bot is a
+  # B… id, Slackbot, or a bot user, whose email Slack sets on slack-bots.com.
+  quiet=$(printf '%s' "$out" | jq -r '.messages // empty' 2>/dev/null | awk '
+    /^=== Message from / {
+      bot = 0
+      if (match($0, /(<[^<>]*> )?\([A-Z0-9]+\) at [^()<>]*===[ ]*$/)) {
+        tail = substr($0, RSTART, RLENGTH)
+        id = tail; sub(/^.*\(/, "", id); sub(/\).*$/, "", id)
+        bot = (id ~ /^B/ || id == "USLACKBOT" || tail ~ /^<[^<>]*@slack-bots\.com> /)
+      }
+    }
+    !bot || /^Thread: / { print }')
+  [ -n "$quiet" ] && out="$quiet"
+  SLACK_SIGS=$(printf '%s' "$SLACK_SIGS" | jq -c --arg k "$ch" \
+    --arg v "$(printf '%s' "$out" | hash16)" '.[$k] = $v')
+}
+
+# slack_read_thread <channel> <thread ts>: put the thread's key into SLACK_SIGS.
+slack_read_thread() {
+  local out
+  out=$("$AC" call "$SLACK_SERVER" slack_read_thread \
+    --json "{\"channel_id\":\"$1\",\"message_ts\":\"$2\"}" --text 2>/dev/null </dev/null)
+  printf '%s' "$out" | grep -q '"messages"' || return 0
+  SLACK_SIGS=$(printf '%s' "$SLACK_SIGS" | jq -c --arg k "$1/$2" \
+    --arg v "$(printf '%s' "$out" | hash16)" '.[$k] = $v')
+}
+
+# slack_open_threads: "<channel> <ts>" per thread the watch reads in full.
+slack_open_threads() {
+  [ -f "$SLACK_THREADS" ] && jq -r '.threads[]? | select(.status != "closed") | "\(.channel) \(.ts)"' \
+    "$SLACK_THREADS" 2>/dev/null
+}
+
+# slack_probe: one search for the newest messages. Sets SLACK_PROBE_KEYS to the
+# keys of each message from a person that the last probe did not return: its
+# channel, and "<channel>/<thread ts>" for a reply. Returns 1 when the search
+# fails, or when every result is new, so more may lie past the page: the caller
+# then reads everything.
+SLACK_PROBE_KEYS='[]'
+slack_probe() {
+  local out rows prev
+  SLACK_PROBE_KEYS='[]'
+  # "after:" excludes its own day, so name the day before yesterday: a message
+  # just after midnight is still in range.
+  out=$("$AC" call "$SLACK_SERVER" slack_search_public_and_private \
+    --json "{\"query\":\"after:$(date -d '-2 day' +%F 2>/dev/null || date -v-2d +%F)\",\"sort\":\"timestamp\",\"sort_dir\":\"desc\",\"limit\":$SLACK_PROBE_LIMIT}" \
+    --text 2>/dev/null </dev/null | jq -r '.results // empty' 2>/dev/null)
+  printf '%s' "$out" | grep -q '^Message_ts: ' || return 1
+  # One row per result: ts, channel, thread ts, bot. The author is judged by the
+  # id and the email only, as in slack_read_channel. "- From:" lines are context.
+  rows=$(printf '%s\n' "$out" | awk '
+    function flush() { if (ts != "") print ts "\t" ch "\t" th "\t" bot; ts = ""; ch = ""; th = ""; bot = 0 }
+    /^### Result / { flush(); next }
+    /^Channel: / { c = $0; sub(/^.*\(ID: /, "", c); sub(/\).*$/, "", c); ch = c; next }
+    /^From: / { a = $0; bot = (a ~ /@slack-bots\.com> /); sub(/^.*\(ID: /, "", a); sub(/\).*$/, "", a)
+                if (a ~ /^B/ || a == "USLACKBOT") bot = 1; next }
+    /^Message_ts: / { ts = $2; next }
+    /^Permalink: / { if (match($0, /thread_ts=[0-9]+\.[0-9]+/)) th = substr($0, RSTART + 10, RLENGTH - 10); next }
+    END { flush() }')
+  [ -n "$rows" ] || return 1
+  prev=$(cat "$SLACK_PROBE" 2>/dev/null); [ -n "$prev" ] || prev='[]'
+  local all new
+  all=$(printf '%s\n' "$rows" | jq -Rsc 'split("\n") | map(select(length > 0) | split("\t")
+    | {ts: .[0], ch: .[1], th: .[2], bot: (.[3] == "1")})')
+  new=$(jq -nc --argjson a "$all" --argjson p "$prev" '[ $a[] | select(.ts as $t | $p | index($t) | not) ]')
+  [ "$PEEK" = 1 ] || printf '%s' "$all" | jq -c 'map(.ts)' > "$SLACK_PROBE"
+  # No earlier probe, or a full page of new messages: read everything.
+  [ "$prev" = '[]' ] && return 1
+  [ "$(jq -n --argjson a "$all" --argjson n "$new" '$a | length == ($n | length)')" = true ] && return 1
+  # The search also finds public channels the account is not in: only the
+  # watched ones count.
+  SLACK_PROBE_KEYS=$(printf '%s' "$new" | jq -c --rawfile cl "$SLACK_CHANLIST" \
+    '($cl | split("\n")) as $watched | [ .[] | select((.bot | not) and (.ch as $c | $watched | index($c)))
+    | .ch, (if .th != "" and .th != .ts then "\(.ch)/\(.th)" else empty end) ] | unique')
+  return 0
+}
+
+# slack_read_keys <JSON array of keys>: read those channels and their open
+# threads again, on top of the last read.
+slack_read_keys() {
+  local ch t
+  SLACK_SIGS=$(jq -c '.sigs // {}' "$SLACK_NOW" 2>/dev/null || echo '{}')
+  for ch in $(printf '%s' "$1" | jq -r '.[] | split("/")[0]' | sort -u); do
+    slack_read_channel "$ch" 0
+  done
+  while read -r ch t; do
+    [ -n "$ch" ] && [ -n "$t" ] || continue
+    printf '%s' "$1" | jq -e --arg k "$ch/$t" 'index($k)' >/dev/null && slack_read_thread "$ch" "$t"
+  done < <(slack_open_threads)
+  [ "$PEEK" = 1 ] || jq --argjson sigs "$SLACK_SIGS" '.sigs = $sigs' "$SLACK_NOW" > "$SLACK_NOW.tmp" 2>/dev/null \
+    && [ -s "$SLACK_NOW.tmp" ] && mv "$SLACK_NOW.tmp" "$SLACK_NOW"
+  rm -f "$SLACK_NOW.tmp"
+}
+
 # slack_read [fresh]: fill SLACK_SIGS with {key: fingerprint}. A key is a
 # channel id, or "<channel>/<thread ts>" for an open thread. A read that
 # returns nothing leaves its key out, so an outage never reads as a change.
@@ -219,6 +373,14 @@ slack_read() {
   now=$(date +%s)
   if [ "$1" != fresh ] && [ -f "$SLACK_NOW" ]; then
     at=$(jq -r '.at // 0' "$SLACK_NOW" 2>/dev/null)
+    if [ $(( now - ${at:-0} )) -lt "$SLACK_FULL_EVERY" ] && slack_probe; then
+      if [ "$SLACK_PROBE_KEYS" = '[]' ]; then
+        SLACK_SIGS=$(jq -c '.sigs // {}' "$SLACK_NOW" 2>/dev/null || echo '{}')
+      else
+        slack_read_keys "$SLACK_PROBE_KEYS"
+      fi
+      return 0
+    fi
     if [ $(( now - ${at:-0} )) -lt "$SLACK_INTERVAL" ]; then
       SLACK_SIGS=$(jq -c '.sigs // {}' "$SLACK_NOW" 2>/dev/null || echo '{}')
       return 0
@@ -236,80 +398,19 @@ slack_read() {
     SLACK_ERR="slack channel list failed (claude mcp login $SLACK_SERVER?)"
     return 0
   fi
-  local newer=0 watch auto='[]' rows kind t line
-  SLACK_FRESH=1
+  local newer=0
+  SLACK_AUTO='[]'; SLACK_FRESH=1
+  slack_probe >/dev/null 2>&1
   [ "$SLACK_AUTOWATCH_DAYS" -gt 0 ] 2>/dev/null && newer=$(( now - SLACK_AUTOWATCH_DAYS * 86400 ))
   for ch in $(cat "$SLACK_CHANLIST"); do
-    out=$("$AC" call "$SLACK_SERVER" slack_read_channel \
-      --json "{\"channel_id\":\"$ch\",\"limit\":30}" --text 2>/dev/null </dev/null)
-    # An answer without messages is an error text, such as a rate limit. It must
-    # not count as a change, or every refused read would wake the loop.
-    if ! printf '%s' "$out" | grep -q '"messages"'; then
-      SLACK_ERR="slack read failed (claude mcp login $SLACK_SERVER?)"
-      continue
-    fi
-    # A reply changes only the "Thread: N replies (latest: …)" line of its
-    # parent, so the channel key alone says that something moved, not where.
-    # Give each such line a key of its own, "<channel>/<parent ts>", at no
-    # extra read. "T" rows are those keys; "P" rows are recent top-level
-    # messages from people, for the auto-watch below. A bot's thread gets no
-    # key: an alert bot replies "repeated N times" under its own alerts, and
-    # the channel key still moves when a person replies there.
-    # A DM keeps few messages, so its newest 30 already cover its threads: the
-    # auto-watch, which costs a read per thread, is for channels only.
-    watch=$newer; case "$ch" in D*) watch=0 ;; esac
-    rows=$(printf '%s' "$out" | jq -r '.messages // empty' 2>/dev/null | awk -v newer="$watch" '
-      /^=== Message from / {
-        ts = ""; bot = 0
-        if (match($0, /(<[^<>]*> )?\([A-Z0-9]+\) at [^()<>]*===[ ]*$/)) {
-          tail = substr($0, RSTART, RLENGTH)
-          id = tail; sub(/^.*\(/, "", id); sub(/\).*$/, "", id)
-          bot = (id ~ /^B/ || id == "USLACKBOT" || tail ~ /^<[^<>]*@slack-bots\.com> /)
-        }
-        next
-      }
-      /^Message TS: [0-9]+\.[0-9]+/ {
-        ts = $3
-        if (!bot && newer > 0 && ts + 0 >= newer) print "P\t" ts
-        next
-      }
-      /^Thread: / && ts != "" && !bot { print "T\t" ts "\t" $0 }')
-    while IFS=$'\t' read -r kind t line; do
-      case "$kind" in
-        T) SLACK_SIGS=$(printf '%s' "$SLACK_SIGS" | jq -c --arg k "$ch/$t" \
-             --arg v "$(printf '%s' "$line" | hash16)" '.[$k] = $v') ;;
-        P) auto=$(printf '%s' "$auto" | jq -c --arg c "$ch" --arg t "$t" '. + [{channel: $c, ts: $t}]') ;;
-      esac
-    done <<< "$rows"
-    # A message from a bot is not news: an alert channel would wake the loop on
-    # every alert, for the tick to skip it. Drop bot messages from the
-    # fingerprint, but keep their "Thread:" line, so a person who replies under
-    # an alert is still seen.
-    # The header is "=== Message from <display name> [<email>] (<id>) at <time> ===".
-    # Judge the author by the id and the email at the END of the line only: the
-    # display name is free text, and a person who puts "botuser-" or
-    # "slack-bots.com" in it must not drop out of the fingerprint. A bot is a
-    # B… id, Slackbot, or a bot user, whose email Slack sets on slack-bots.com.
-    quiet=$(printf '%s' "$out" | jq -r '.messages // empty' 2>/dev/null | awk '
-      /^=== Message from / {
-        bot = 0
-        if (match($0, /(<[^<>]*> )?\([A-Z0-9]+\) at [^()<>]*===[ ]*$/)) {
-          tail = substr($0, RSTART, RLENGTH)
-          id = tail; sub(/^.*\(/, "", id); sub(/\).*$/, "", id)
-          bot = (id ~ /^B/ || id == "USLACKBOT" || tail ~ /^<[^<>]*@slack-bots\.com> /)
-        }
-      }
-      !bot || /^Thread: / { print }')
-    [ -n "$quiet" ] && out="$quiet"
-    SLACK_SIGS=$(printf '%s' "$SLACK_SIGS" | jq -c --arg k "$ch" \
-      --arg v "$(printf '%s' "$out" | hash16)" '.[$k] = $v')
+    slack_read_channel "$ch" "$newer"
   done
   # The auto-watch: record each recent top-level message of a person as an open
   # thread, and drop an auto entry once its parent is older than the window. The
   # tick's own entries are never touched. A peek writes nothing.
   if [ "$PEEK" != 1 ] && [ "$newer" -gt 0 ]; then
     [ -f "$SLACK_THREADS" ] || echo '{"threads":[]}' > "$SLACK_THREADS"
-    SLACK_NEWKEYS=$(jq -c --argjson add "$auto" '(.threads // []) as $t
+    SLACK_NEWKEYS=$(jq -c --argjson add "$SLACK_AUTO" '(.threads // []) as $t
       | [ $add[] | select(. as $a | $t | all(.channel != $a.channel or .ts != $a.ts)) | "\(.channel)/\(.ts)" ]' \
       "$SLACK_THREADS" 2>/dev/null || echo '[]')
     # An expired auto entry goes back to the cheap fingerprint of its channel
@@ -317,7 +418,7 @@ slack_read() {
     SLACK_NEWKEYS=$(jq -c --argjson n "$SLACK_NEWKEYS" --argjson newer "$newer" \
       '$n + [ (.threads // [])[] | select(.auto == true and (.ts | tonumber) < $newer) | "\(.channel)/\(.ts)" ]' \
       "$SLACK_THREADS" 2>/dev/null || printf '%s' "$SLACK_NEWKEYS")
-    jq --argjson add "$auto" --argjson newer "$newer" '
+    jq --argjson add "$SLACK_AUTO" --argjson newer "$newer" '
       ((.threads // []) | map(select((.auto != true) or ((.ts | tonumber) >= $newer)))) as $kept
       | .threads = $kept + [ $add[] | select(. as $a | $kept | all(.channel != $a.channel or .ts != $a.ts))
                               | . + {status: "watching", auto: true} ]' \
@@ -325,17 +426,9 @@ slack_read() {
       && [ -s "$SLACK_THREADS.tmp" ] && mv "$SLACK_THREADS.tmp" "$SLACK_THREADS"
     rm -f "$SLACK_THREADS.tmp"
   fi
-  if [ -f "$SLACK_THREADS" ]; then
-    while read -r ch t; do
-      [ -n "$ch" ] && [ -n "$t" ] || continue
-      out=$("$AC" call "$SLACK_SERVER" slack_read_thread \
-        --json "{\"channel_id\":\"$ch\",\"message_ts\":\"$t\"}" --text 2>/dev/null </dev/null)
-      printf '%s' "$out" | grep -q '"messages"' || continue
-      SLACK_SIGS=$(printf '%s' "$SLACK_SIGS" | jq -c --arg k "$ch/$t" \
-        --arg v "$(printf '%s' "$out" | hash16)" '.[$k] = $v')
-    done < <(jq -r '.threads[]? | select(.status != "closed") | "\(.channel) \(.ts)"' \
-               "$SLACK_THREADS" 2>/dev/null)
-  fi
+  while read -r ch t; do
+    [ -n "$ch" ] && [ -n "$t" ] && slack_read_thread "$ch" "$t"
+  done < <(slack_open_threads)
   [ "$PEEK" = 1 ] || jq -nc --argjson at "$now" --argjson sigs "$SLACK_SIGS" \
     '{at: $at, sigs: $sigs}' > "$SLACK_NOW"
 }
@@ -485,17 +578,19 @@ save_adopt_state() { [ "$PEEK" = 1 ] || printf '%s' "$1" > "$ASTATE"; }
 # tick's own replies moved the fingerprints, and record that as seen.
 if [ "$1" = "--slack-ack" ]; then
   [ "$SLACK_ON" = 1 ] || { echo "slack: off (LO_SLACK is not 1)"; exit 0; }
-  slack_read fresh
   seen=$(cat "$SLACK_SEEN" 2>/dev/null); [ -n "$seen" ] || seen='{}'
   shift
-  if [ "$1" = all ]; then
+  if [ "$1" = all ] || [ ! -f "$SLACK_NOW" ]; then
     # The baseline, on the day the watch is switched on: everything is seen.
+    slack_read fresh
     keys=$(printf '%s' "$SLACK_SIGS" | jq -c 'keys')
   else
     # What the last SLACK line showed, plus any key named here (a thread the
-    # tick just opened, as "<channel>/<ts>").
+    # tick just opened, as "<channel>/<ts>"). Only those are read again: the
+    # tick's own replies moved them, and nothing else is acknowledged.
     shown=$(cat "$SLACK_SHOWN" 2>/dev/null); [ -n "$shown" ] || shown='[]'
     keys=$(jq -nc --argjson a "$shown" '$a + $ARGS.positional' --args "$@")
+    slack_read_keys "$keys"
   fi
   # This fresh read may have added or dropped auto-watch threads: they start
   # from what they hold now, as on a probe, or each would wake the loop once.
