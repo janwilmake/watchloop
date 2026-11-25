@@ -1211,7 +1211,12 @@ probe() {
     fi
   fi
   n_slack=$(printf '%s' "$slack" | jq 'length')
-  slacksig=$(printf '%s' "$slack" | hash16)
+  # The wake signature holds the fingerprints, not only the names: a second
+  # message in the channel or thread the model was just shown leaves the names
+  # the same, and must still wake the loop.
+  slacksig=$(jq -nc --argjson n "$SLACK_SIGS" --argjson l "$slack" \
+    '[ $l[] | (if .thread then "\(.channel)/\(.thread)" else .channel end) as $k | [$k, $n[$k]] ]' \
+    2>/dev/null | hash16)
   prevslack=$(cat "$SLSTATE" 2>/dev/null)
 
   # --- Inbox watch: which of emails, meetings, calls moved since the last ack ---
@@ -1226,7 +1231,9 @@ probe() {
     fi
   fi
   n_inbox=$(printf '%s' "$inbox" | jq 'length')
-  inboxsig=$(printf '%s' "$inbox" | hash16)
+  # Fingerprints too, as for Slack: a second new email is still news.
+  inboxsig=$(jq -nc --argjson n "$INBOX_SIGS" --argjson l "$inbox" '[ $l[] | [., $n[.]] ]' \
+    2>/dev/null | hash16)
   previnbox=$(cat "$ISTATE" 2>/dev/null)
 
   # --- Schedules: jobs whose run time has come (lo-schedule.sh) ---
