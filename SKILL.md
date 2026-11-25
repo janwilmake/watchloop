@@ -362,6 +362,14 @@ watched. `gate.sh` takes a fingerprint of each one, and of each thread the loop
 left open, and prints the ones that moved on the `SLACK` line. The gate does not
 read the messages; the tick does.
 
+**A probe costs one call.** Between full reads, the gate runs one Slack search
+for the newest 20 messages and reads again only the channels and open threads
+that hold a new message from a person. A full read, one call per channel and per
+open thread, runs every `LO_SLACK_FULL_EVERY` seconds (default 1800) as a safety
+net for a message the search index missed, and whenever the search fails or
+returns a full page of new messages. `--slack-ack` reads only the keys it
+acknowledges.
+
 **A reply is named by its thread, not only by its channel.** A reply under any
 of a channel's newest 30 messages moves that message's `Thread: N replies` line,
 and the gate prints it as `{channel, thread}`. A person's top-level message in
