@@ -198,7 +198,7 @@ SLACK_PROBE_LIMIT=20
 # --wait looks at Slack this often while it sleeps, and cuts the sleep short
 # when a person wrote: the rest of a probe (the forge, Linear) takes about a
 # minute, so a message would otherwise wait for the sleep and then that minute.
-SLACK_PEEK_EVERY="${LO_SLACK_PEEK_EVERY:-15}"
+SLACK_PEEK_EVERY="${LO_SLACK_PEEK_EVERY:-5}"
 SLACK_THREADS=~/.claude/watchloop/${PREFIX}-slack.json   # the tick's own record of threads
 SLACK_SEEN=~/.claude/watchloop/gate-slack-seen.json      # key -> fingerprint the tick acknowledged
 # A person's top-level message is watched as a thread for this many days, so a
