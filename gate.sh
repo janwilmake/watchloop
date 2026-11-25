@@ -195,6 +195,10 @@ SLACK_INTERVAL="${LO_SLACK_INTERVAL:-300}"    # seconds between real reads; --wa
 SLACK_FULL_EVERY="${LO_SLACK_FULL_EVERY:-1800}"
 SLACK_PROBE=~/.claude/watchloop/gate-slack-probe.json   # the message ts the last search returned
 SLACK_PROBE_LIMIT=20
+# --wait looks at Slack this often while it sleeps, and cuts the sleep short
+# when a person wrote: the rest of a probe (the forge, Linear) takes about a
+# minute, so a message would otherwise wait for the sleep and then that minute.
+SLACK_PEEK_EVERY="${LO_SLACK_PEEK_EVERY:-15}"
 SLACK_THREADS=~/.claude/watchloop/${PREFIX}-slack.json   # the tick's own record of threads
 SLACK_SEEN=~/.claude/watchloop/gate-slack-seen.json      # key -> fingerprint the tick acknowledged
 # A person's top-level message is watched as a thread for this many days, so a
@@ -346,6 +350,15 @@ slack_probe() {
     '($cl | split("\n")) as $watched | [ .[] | select((.bot | not) and (.ch as $c | $watched | index($c)))
     | .ch, (if .th != "" and .th != .ts then "\(.ch)/\(.th)" else empty end) ] | unique')
   return 0
+}
+
+# slack_peek_new: 0 when the search names a new message from a person. The
+# starting point stays where it is, so the next real probe still reads it.
+slack_peek_new() {
+  [ "$SLACK_ON" = 1 ] && [ -s "$SLACK_PROBE" ] || return 1
+  local keep=$PEEK rc
+  PEEK=1; slack_probe; rc=$?; PEEK=$keep
+  [ "$rc" = 0 ] && [ "$SLACK_PROBE_KEYS" != '[]' ]
 }
 
 # slack_read_keys <JSON array of keys>: read those channels and their open
@@ -1536,5 +1549,9 @@ while :; do
     echo "--- still nothing after $(dur $(( now - started ))), re-arm ---"
     exit 0
   fi
-  sleep "$WAIT_INTERVAL"
+  waited=0
+  while [ "$waited" -lt "$WAIT_INTERVAL" ]; do
+    sleep "$SLACK_PEEK_EVERY"; waited=$(( waited + SLACK_PEEK_EVERY ))
+    slack_peek_new && break
+  done
 done
