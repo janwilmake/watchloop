@@ -773,6 +773,52 @@ NOREASON=""
 # probe: measure the world once. Prints the context block and returns 0 when
 # there is work; prints nothing and returns 1 when there is not, leaving the
 # reason in $NOREASON for the caller to print or swallow.
+# slack_check: set slack (the keys that moved since the tick's last ack),
+# n_slack, slacksig and prevslack. probe() runs it, and so does the waiter's
+# fast path for a Slack message.
+slack_check() {
+  # Read at any slot count: a ticket order in a thread needs no agent.
+  slack='[]'
+  if [ "$SLACK_ON" = 1 ]; then
+    if [ -x "$AC" ] || command -v "$AC" >/dev/null 2>&1; then
+      slack_read
+      slack_seen=$(cat "$SLACK_SEEN" 2>/dev/null); [ -n "$slack_seen" ] || slack_seen='{}'
+      # A thread key that the auto-watch just added or dropped, and on the first
+      # run every thread key nobody acknowledged yet, starts from what it holds
+      # now. A new message is already named by its channel key; only a later
+      # reply is news.
+      if [ "$PEEK" != 1 ]; then
+        if [ -f "$SLACK_TKEYS_V1" ] || [ "$SLACK_FRESH" != 1 ]; then base="$SLACK_NEWKEYS"
+        else base=$(printf '%s' "$SLACK_SIGS" | jq -c '[keys[] | select(contains("/"))]'); fi
+        if [ "$(printf '%s' "$base" | jq 'length' 2>/dev/null)" != 0 ]; then
+          slack_seen=$(jq -nc --argjson s "$slack_seen" --argjson n "$SLACK_SIGS" --argjson b "$base" \
+            --argjson first "$([ -f "$SLACK_TKEYS_V1" ] && echo false || echo true)" '
+            reduce $b[] as $k ($s; if ($n[$k] != null) and ($first == false or .[$k] == null)
+                                   then .[$k] = $n[$k] else . end)')
+          printf '%s\n' "$slack_seen" > "$SLACK_SEEN"
+        fi
+        [ "$SLACK_FRESH" = 1 ] && [ -z "$SLACK_ERR" ] && touch "$SLACK_TKEYS_V1"
+      fi
+      slack=$(jq -nc --argjson n "$SLACK_SIGS" --argjson s "$slack_seen" '
+        [ $n | to_entries[] | select($s[.key] != .value)
+          | (.key | split("/")) as $p
+          | if ($p | length) > 1 then {channel: $p[0], thread: $p[1]} else {channel: $p[0]} end ]' \
+        2>/dev/null || echo '[]')
+      [ -n "$SLACK_ERR" ] && notes="$notes${notes:+; }$SLACK_ERR"
+    else
+      notes="$notes${notes:+; }agent-codemode CLI not found; Slack check skipped"
+    fi
+  fi
+  n_slack=$(printf '%s' "$slack" | jq 'length')
+  # The wake signature holds the fingerprints, not only the names: a second
+  # message in the channel or thread the model was just shown leaves the names
+  # the same, and must still wake the loop.
+  slacksig=$(jq -nc --argjson n "$SLACK_SIGS" --argjson l "$slack" \
+    '[ $l[] | (if .thread then "\(.channel)/\(.thread)" else .channel end) as $k | [$k, $n[$k]] ]' \
+    2>/dev/null | hash16)
+  prevslack=$(cat "$SLSTATE" 2>/dev/null)
+}
+
 probe() {
   # Set when the forge could not be read at all. It is not work, and in --wait
   # the caller decides whether an outage has lasted long enough to wake for.
@@ -1177,47 +1223,7 @@ probe() {
   fi
   n_adopt=$(printf '%s' "$adopt" | jq 'length')
 
-  # --- Slack: channels and open threads that moved since the tick's last ack ---
-  # Read at any slot count: a ticket order in a thread needs no agent.
-  slack='[]'
-  if [ "$SLACK_ON" = 1 ]; then
-    if [ -x "$AC" ] || command -v "$AC" >/dev/null 2>&1; then
-      slack_read
-      slack_seen=$(cat "$SLACK_SEEN" 2>/dev/null); [ -n "$slack_seen" ] || slack_seen='{}'
-      # A thread key that the auto-watch just added or dropped, and on the first
-      # run every thread key nobody acknowledged yet, starts from what it holds
-      # now. A new message is already named by its channel key; only a later
-      # reply is news.
-      if [ "$PEEK" != 1 ]; then
-        if [ -f "$SLACK_TKEYS_V1" ] || [ "$SLACK_FRESH" != 1 ]; then base="$SLACK_NEWKEYS"
-        else base=$(printf '%s' "$SLACK_SIGS" | jq -c '[keys[] | select(contains("/"))]'); fi
-        if [ "$(printf '%s' "$base" | jq 'length' 2>/dev/null)" != 0 ]; then
-          slack_seen=$(jq -nc --argjson s "$slack_seen" --argjson n "$SLACK_SIGS" --argjson b "$base" \
-            --argjson first "$([ -f "$SLACK_TKEYS_V1" ] && echo false || echo true)" '
-            reduce $b[] as $k ($s; if ($n[$k] != null) and ($first == false or .[$k] == null)
-                                   then .[$k] = $n[$k] else . end)')
-          printf '%s\n' "$slack_seen" > "$SLACK_SEEN"
-        fi
-        [ "$SLACK_FRESH" = 1 ] && [ -z "$SLACK_ERR" ] && touch "$SLACK_TKEYS_V1"
-      fi
-      slack=$(jq -nc --argjson n "$SLACK_SIGS" --argjson s "$slack_seen" '
-        [ $n | to_entries[] | select($s[.key] != .value)
-          | (.key | split("/")) as $p
-          | if ($p | length) > 1 then {channel: $p[0], thread: $p[1]} else {channel: $p[0]} end ]' \
-        2>/dev/null || echo '[]')
-      [ -n "$SLACK_ERR" ] && notes="$notes${notes:+; }$SLACK_ERR"
-    else
-      notes="$notes${notes:+; }agent-codemode CLI not found; Slack check skipped"
-    fi
-  fi
-  n_slack=$(printf '%s' "$slack" | jq 'length')
-  # The wake signature holds the fingerprints, not only the names: a second
-  # message in the channel or thread the model was just shown leaves the names
-  # the same, and must still wake the loop.
-  slacksig=$(jq -nc --argjson n "$SLACK_SIGS" --argjson l "$slack" \
-    '[ $l[] | (if .thread then "\(.channel)/\(.thread)" else .channel end) as $k | [$k, $n[$k]] ]' \
-    2>/dev/null | hash16)
-  prevslack=$(cat "$SLSTATE" 2>/dev/null)
+  slack_check
 
   # --- Inbox watch: which of emails, meetings, calls moved since the last ack ---
   inbox='[]'
@@ -1559,6 +1565,18 @@ while :; do
   waited=0
   while [ "$waited" -lt "$WAIT_INTERVAL" ]; do
     sleep "$SLACK_PEEK_EVERY"; waited=$(( waited + SLACK_PEEK_EVERY ))
-    slack_peek_new && break
+    slack_peek_new || continue
+    # A person wrote. Wake on Slack alone: the forge and Linear take most of a
+    # probe, and the next wake reads them. A message that changes nothing the
+    # tick has not seen (its own reply) only moves the starting point.
+    notes=""; slack_check
+    if [ "$n_slack" -gt 0 ] && [ "$slacksig" != "$prevslack" ]; then
+      printf '%s' "$slacksig" > "$SLSTATE"
+      printf '%s' "$slack" | jq -c '[ .[] | if .thread then "\(.channel)/\(.thread)" else .channel end ]' > "$SLACK_SHOWN"
+      echo "SLACK: $slack"
+      [ -n "$notes" ] && echo "notes: $notes"
+      echo "--- woke for Slack after $(dur $(( $(date +%s) - started ))); the board was not read ---"
+      exit 0
+    fi
   done
 done
