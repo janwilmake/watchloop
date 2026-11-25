@@ -336,8 +336,9 @@ slack_probe() {
     | {ts: .[0], ch: .[1], th: .[2], bot: (.[3] == "1")})')
   new=$(jq -nc --argjson a "$all" --argjson p "$prev" '[ $a[] | select(.ts as $t | $p | index($t) | not) ]')
   [ "$PEEK" = 1 ] || printf '%s' "$all" | jq -c 'map(.ts)' > "$SLACK_PROBE"
-  # No earlier probe, or a full page of new messages: read everything.
-  [ "$prev" = '[]' ] && return 1
+  # No earlier probe: this one is the starting point, and nothing is new yet.
+  [ "$prev" = '[]' ] && return 0
+  # A full page of new messages: more may lie past it, so read every channel.
   [ "$(jq -n --argjson a "$all" --argjson n "$new" '$a | length == ($n | length)')" = true ] && return 1
   # The search also finds public channels the account is not in: only the
   # watched ones count.
@@ -426,8 +427,18 @@ slack_read() {
       && [ -s "$SLACK_THREADS.tmp" ] && mv "$SLACK_THREADS.tmp" "$SLACK_THREADS"
     rm -f "$SLACK_THREADS.tmp"
   fi
+  # The open threads cost a read each, hundreds of them, and the probe already
+  # names a thread with a new reply. So only a fresh read, or a first one,
+  # reads them all; a routine read keeps their fingerprints from the last read.
+  local last='{}'
+  [ "$1" != fresh ] && last=$(jq -c '.sigs // {}' "$SLACK_NOW" 2>/dev/null || echo '{}')
   while read -r ch t; do
-    [ -n "$ch" ] && [ -n "$t" ] && slack_read_thread "$ch" "$t"
+    [ -n "$ch" ] && [ -n "$t" ] || continue
+    if [ "$(printf '%s' "$last" | jq -r --arg k "$ch/$t" 'has($k)')" = true ]; then
+      SLACK_SIGS=$(jq -nc --argjson n "$SLACK_SIGS" --argjson l "$last" --arg k "$ch/$t" '$n + {($k): $l[$k]}')
+    else
+      slack_read_thread "$ch" "$t"
+    fi
   done < <(slack_open_threads)
   [ "$PEEK" = 1 ] || jq -nc --argjson at "$now" --argjson sigs "$SLACK_SIGS" \
     '{at: $at, sigs: $sigs}' > "$SLACK_NOW"
