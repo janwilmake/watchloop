@@ -1384,8 +1384,10 @@ probe() {
   # change. See RSTATE above for why the unconditional form spun.
   [ "$n_regate"  -gt 0 ] && [ "$regatesig" != "$prevregate" ] && work=yes
   # A new conflict is work at any slot count: its fix is queued even when the
-  # machine is full. A set that only shrank is not news.
-  [ "$n_conflicts" -gt 0 ] && [ "$conflictsig" != "$prevconflicts" ] \
+  # machine is full. A set that only shrank is not news. While GitHub still
+  # reports UNKNOWN, the set is partial: it shrinks and grows back as the
+  # verdicts arrive, so only a settled set (no UNKNOWN) is compared and saved.
+  [ "$n_unknown" -eq 0 ] && [ "$n_conflicts" -gt 0 ] && [ "$conflictsig" != "$prevconflicts" ] \
     && [ -n "$(jq -n --argjson n "$conflicts" --argjson p "$(cat "$CSTATE.list" 2>/dev/null || echo '[]')" '$n - $p | .[]?')" ] && work=yes
   [ "$n_invalid" -gt 0 ] && work=yes
   # Feedback needs no slot to act on: a reply, a re-draft and a follow-up ticket
@@ -1474,7 +1476,7 @@ probe() {
       save_state "$hash"
       save_drafts_state "$draftsig"
       save_regate_state "$regatesig"
-      [ "$PEEK" = 1 ] || { printf '%s' "$conflictsig" > "$CSTATE"; printf '%s' "$conflicts" > "$CSTATE.list"; }
+      [ "$PEEK" = 1 ] || [ "$n_unknown" -gt 0 ] || { printf '%s' "$conflictsig" > "$CSTATE"; printf '%s' "$conflicts" > "$CSTATE.list"; }
       save_adopt_state "$adoptsig"
       [ "$PEEK" = 1 ] || printf '%s' "$slacksig" > "$SLSTATE"
       [ "$PEEK" = 1 ] || printf '%s' "$fbsig" > "$FSTATE"
@@ -1487,7 +1489,7 @@ probe() {
   save_state "$hash"
   save_drafts_state "$draftsig"
   save_regate_state "$regatesig"
-  [ "$PEEK" = 1 ] || { printf '%s' "$conflictsig" > "$CSTATE"; printf '%s' "$conflicts" > "$CSTATE.list"; }
+  [ "$PEEK" = 1 ] || [ "$n_unknown" -gt 0 ] || { printf '%s' "$conflictsig" > "$CSTATE"; printf '%s' "$conflicts" > "$CSTATE.list"; }
   save_adopt_state "$adoptsig"
   [ "$PEEK" = 1 ] || printf '%s' "$slacksig" > "$SLSTATE"
   [ "$PEEK" = 1 ] || printf '%s' "$fbsig" > "$FSTATE"
