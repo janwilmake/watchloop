@@ -156,6 +156,10 @@ DSTATE=~/.claude/watchloop/gate-drafts-state
 # exist, a layer whose base is mid-repair — and nothing in the gate records that
 # decision, so an unconditional work=yes re-wakes on the entry forever.
 RSTATE=~/.claude/watchloop/gate-regate-state
+# Every open PR that conflicts with its base, whoever opened it and draft or not.
+# REGATE covers only the loop's promoted PRs; this line is the full count, so a
+# conflict on a draft or an adopted PR is never silent. It wakes once per change.
+CSTATE=~/.claude/watchloop/gate-conflicts-state
 # Adopted PRs: PRs a person opened, not the loop, that the loop still looks
 # after. LO_ADOPT_AUTHORS lists the GitHub logins (comma separated, case
 # insensitive); LO_ADOPT_SINCE keeps it to PRs created after that instant, so
@@ -961,7 +965,7 @@ probe() {
 
   # `ci` is null on a PR whose verdict nothing reads (ciDetail false, see
   # fetch_board): no line and no decision below looks at it.
-  verdicts=$(printf '%s' "$prs" | jq -c --arg m "$PR_MARKER" '[ .[] | {
+  verdicts=$(printf '%s' "$prs" | jq -c --arg m "$PR_MARKER" --arg b "$BASE" '[ .[] | {
       pr: .number, draft: .isDraft, merge: .mergeable, head: .headRefName,
       base: .baseRefName, author: ((.author.login // "") | ascii_downcase),
       created: (.createdAt // ""),
@@ -985,7 +989,10 @@ probe() {
                 and .conclusion != "CANCELLED") ] as $c
             | if   ([ $c[] | select((.name // "") | startswith("Test (shard")) ] | length) == 0 then "not-run"
               elif ([ $c[] | select(.conclusion != "SUCCESS") ] | length) > 0 then "failing"
-              else "green" end end ) } ] | map(select(.base != "main")) | sort_by(.pr)')
+              else "green" end end ) } ]
+      # A release PR from the trunk into main is no work of the loop while the
+      # trunk is another branch. Once the trunk IS main, every PR targets it.
+      | map(select($b == "main" or .base != "main")) | sort_by(.pr)')
 
   # A stale board never re-drafts: the PR may have been fixed since, and a
   # re-draft takes a promoted PR out of review.
@@ -1180,6 +1187,12 @@ probe() {
   n_feedback=$(printf '%s' "$feedback" | jq 'length')
 
   n_regate=$(printf '%s' "$regate"  | jq 'length')
+  # GitHub computes `mergeable` lazily: after the base moves, a PR reads UNKNOWN
+  # until something asks. The board query is that ask, so an UNKNOWN turns into a
+  # verdict on a later probe; the count says how many are still out.
+  conflicts=$(printf '%s' "$prs" | jq -c '[ .[] | select(.mergeable == "CONFLICTING") | .number ] | sort')
+  n_conflicts=$(printf '%s' "$conflicts" | jq 'length')
+  n_unknown=$(printf '%s' "$prs" | jq '[ .[] | select(.mergeable == "UNKNOWN") ] | length')
   n_invalid=$(printf '%s' "$invalid" | jq 'length')
   n_drafts=$(printf '%s' "$drafts"  | jq 'length')
   n_stack=$(printf '%s' "$stack"   | jq 'length')
@@ -1351,12 +1364,15 @@ probe() {
   regatesig=$(printf '%s' "$regate" | jq -Sc '[ .[] | {pr,draft,merge,ci,invalid} ]' \
       2>/dev/null | hash16)
   prevregate=$(cat "$RSTATE" 2>/dev/null)
+  conflictsig=$(printf '%s' "$conflicts" | hash16)
+  prevconflicts=$(cat "$CSTATE" 2>/dev/null)
   adoptsig=$(printf '%s' "$adopt" | jq -Sc '[ .[] | {pr,merge,ci,needs} ]' 2>/dev/null | hash16)
   prevadopt=$(cat "$ASTATE" 2>/dev/null)
   # A board the probe could not read moves none of the three fingerprints, or
   # the first good board after the outage re-wakes on entries already seen.
   if [ -n "$GATE_ERR" ]; then
     regatesig="$prevregate"
+    conflictsig="$prevconflicts"
     [ -n "$NOBOARD" ] && { draftsig="$prevdrafts"; adoptsig="$prevadopt"; }
   fi
 
@@ -1367,6 +1383,10 @@ probe() {
   # Still acted on at slots 0 — a de-gate needs no agent — but only once per
   # change. See RSTATE above for why the unconditional form spun.
   [ "$n_regate"  -gt 0 ] && [ "$regatesig" != "$prevregate" ] && work=yes
+  # A new conflict is work at any slot count: its fix is queued even when the
+  # machine is full. A set that only shrank is not news.
+  [ "$n_conflicts" -gt 0 ] && [ "$conflictsig" != "$prevconflicts" ] \
+    && [ -n "$(jq -n --argjson n "$conflicts" --argjson p "$(cat "$CSTATE.list" 2>/dev/null || echo '[]')" '$n - $p | .[]?')" ] && work=yes
   [ "$n_invalid" -gt 0 ] && work=yes
   # Feedback needs no slot to act on: a reply, a re-draft and a follow-up ticket
   # are all free. Only the rework behind it needs an agent.
@@ -1454,6 +1474,7 @@ probe() {
       save_state "$hash"
       save_drafts_state "$draftsig"
       save_regate_state "$regatesig"
+      [ "$PEEK" = 1 ] || { printf '%s' "$conflictsig" > "$CSTATE"; printf '%s' "$conflicts" > "$CSTATE.list"; }
       save_adopt_state "$adoptsig"
       [ "$PEEK" = 1 ] || printf '%s' "$slacksig" > "$SLSTATE"
       [ "$PEEK" = 1 ] || printf '%s' "$fbsig" > "$FSTATE"
@@ -1466,6 +1487,7 @@ probe() {
   save_state "$hash"
   save_drafts_state "$draftsig"
   save_regate_state "$regatesig"
+  [ "$PEEK" = 1 ] || { printf '%s' "$conflictsig" > "$CSTATE"; printf '%s' "$conflicts" > "$CSTATE.list"; }
   save_adopt_state "$adoptsig"
   [ "$PEEK" = 1 ] || printf '%s' "$slacksig" > "$SLSTATE"
   [ "$PEEK" = 1 ] || printf '%s' "$fbsig" > "$FSTATE"
@@ -1481,6 +1503,8 @@ probe() {
   # Every line read off a cached board says how old that board is.
   sm="${STALE_M:+ (stale ${STALE_M}m)}"
   [ "$n_regate"  -gt 0 ]    && echo "REGATE: $regate"
+  { [ "$n_conflicts" -gt 0 ] || [ "$n_unknown" -gt 0 ]; } \
+    && echo "CONFLICTS: $n_conflicts $conflicts (still UNKNOWN: $n_unknown)"
   [ "$n_feedback" -gt 0 ]   && echo "FEEDBACK: $feedback"
   [ "$n_slack" -gt 0 ]      && echo "SLACK: $slack"
   if [ "$n_slack" -gt 0 ] && [ "$PEEK" != 1 ]; then

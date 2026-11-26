@@ -181,6 +181,7 @@ GATE-ERROR: …            # the PR board could not be read; the probe ran on an
 FORGE-DOWN 12m: …        # LO_GATE_ERR_WAKE failed reads in a row; again once an hour
 FORGE-UP after 40m       # the first good read after a FORGE-DOWN, once
 REGATE: [ … ]            # promoted PRs that stopped being mergeable / went red
+CONFLICTS: n [ … ] (still UNKNOWN: m)   # every open PR that conflicts, any author, drafts too
 FEEDBACK: [ … ]          # unanswered comments on the loop's PRs
 SLACK: [ … ]             # Slack channels and open threads that moved since the last ack
 INBOX: [ … ]             # which of emails, meetings, calls has a new row for the watched person
@@ -893,6 +894,27 @@ starts a run now, outside the schedule. Use it only on a person's order.
 **Never start a scheduled job with `--dangerously-skip-permissions`**, and
 never widen its rules: the allowlist is what a person reviewed when the job was
 merged. A job that needs a tool it lacks gets it through a PR to its file.
+
+#### 2b2 — Solve every conflict
+
+The `CONFLICTS` line lists every open PR that conflicts with its base: the
+loop's own drafts, promoted PRs and adopted PRs alike. REGATE covers only the
+loop's promoted ones. **The loop solves them all, unasked.** Per PR not already
+in an agent's hands, queue one merge-only fix: merge the PR's base branch into
+it, keep both intents, the base winning for behaviour that shipped, no rebase,
+no force-push, and one `fix` entry in the PR's log naming each conflict. On an
+adopted PR the agent changes only what the conflict needs and keeps the
+person's commits; the rest of the adopted-PR rule holds (no promote, re-draft,
+merge, close or retitle). A promoted PR goes through 2b as well, so it is
+re-drafted first.
+
+`still UNKNOWN: m` counts PRs GitHub has not judged since their base moved.
+The board query asks for them, so they settle on a later probe; a count that
+stays above 0 for an hour is worth a look.
+
+**Read every line the gate prints.** Never filter `REGATE`, `RESTACK`,
+`STACK`, `ADOPT` or `CONFLICTS` out of the waiter output to keep it short: on
+26 Nov 2026 that hid 38 conflicting PRs for days.
 
 #### 2c — Finish the drafts
 
